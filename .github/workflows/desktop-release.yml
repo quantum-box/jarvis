@@ -2,6 +2,9 @@ name: Publish signed desktop updates
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [package.json]
 
 permissions:
   contents: read
@@ -11,8 +14,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Release only a version change or an explicit dispatch
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const current = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          let release = process.env.EVENT_NAME === 'workflow_dispatch';
+          if (!release) {
+            const previous = JSON.parse(execFileSync('git', ['show', `${process.env.BEFORE_SHA}:package.json`], { encoding: 'utf8' })).version;
+            release = previous !== current;
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `release=${release}\n`);
+          JS
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
     name: macOS update (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45

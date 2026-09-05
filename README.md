@@ -164,7 +164,10 @@ versioned archives first and each architecture's `latest.json` last. Serve JSON 
 cache lifetime. Both manifests use their archive's actual signature. Never overwrite archives
 for an already published version. The app only accepts a newer version with a valid signature.
 
-The **Publish signed desktop updates** workflow is manually dispatched on `main`.
+The **Publish signed desktop updates** workflow runs when a `package.json` version
+change is merged into `main`, and can also be manually dispatched on `main`.
+Merging application changes without increasing the version does not publish an update.
+Dependency-only changes to `package.json` skip the release build.
 It builds both macOS architectures, validates and combines their manifests, uploads a
 complete draft release, and only then makes it public. Only the publish job has
 `contents: write`; it uses the ephemeral `GITHUB_TOKEN`, never a persisted CLI token.
