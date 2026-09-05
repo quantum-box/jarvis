@@ -10,6 +10,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
+    "mobile:android:init": "tauri android init --ci --skip-targets-install && python3 scripts/prepare-android.py",
+    "mobile:ios:init": "tauri ios init --ci --skip-targets-install",
     "test": "vitest run"
   },
   "dependencies": {

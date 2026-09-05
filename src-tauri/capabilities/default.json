@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the JARVIS desktop window.",
+  "description": "Default capability for the JARVIS application window.",
   "windows": ["main"],
   "permissions": [
     "core:default",
