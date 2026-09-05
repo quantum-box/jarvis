@@ -131,7 +131,7 @@ const EMPTY_TRANSPORT: Transport = {
 	remoteStream: null,
 }
 
-const DEFAULT_MODEL = 'gpt-realtime-2'
+export const DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1'
 const DEFAULT_VOICE = 'marin'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -249,7 +249,7 @@ export class Realtime {
 	) {
 		this.settings = {
 			...settings,
-			model: settings.model || DEFAULT_MODEL,
+			model: settings.model || DEFAULT_REALTIME_MODEL,
 			voice: settings.voice || DEFAULT_VOICE,
 		}
 		this.dependencies = {

@@ -1,5 +1,12 @@
 # Validation
 
+## GPT Realtime 2.1 (PLT-4245)
+
+- Updated the shared UI/transport default to `gpt-realtime-2.1`, matching merged Tachyon PR #9325. Older saved default aliases upgrade on load; other models and explicit choices saved with the new settings version survive reload.
+- `npm test`: 35 tests passed, including actual call-request model assertions, blank-model fallback, saved-setting migration, and explicit legacy-model persistence.
+- TypeScript/Vite production build and Tauri debug macOS app bundle passed. Copied the unsigned bundle to `artifacts/realtime-2.1/JARVIS.app`; `plutil -lint` passed.
+- Live authenticated Tachyon/OpenAI voice connection, provider model availability, and updated native UI launch were not verified. This local build does not prove API deployment. No commit, push, or PR was created for this revision.
+
 2026-09-05 / macOS
 
 - `npm test`: 22 tests passed. Tachyon SDP exchange, mute and text send, incremental transcripts, cancellation during microphone acquisition, provider errors, unsafe URL rejection, and token storage behavior use injected browser/HTTP doubles. Cognito login, MFA/OTP/new-password challenges, refresh singleflight, stale refresh after logout, invalid refresh, timeout, and Tachyon user-token/tenant/chatroom contracts are covered.

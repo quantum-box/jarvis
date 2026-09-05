@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X, ShieldCheck } from "lucide-react";
+import { DEFAULT_REALTIME_MODEL } from "../lib/realtime";
 export interface ConnectionSettings {
   baseUrl: string;
   tenantId: string;
@@ -16,7 +17,7 @@ export const defaults: ConnectionSettings = {
   cognitoRegion: import.meta.env.VITE_COGNITO_REGION || "ap-northeast-1",
   cognitoClientId: import.meta.env.VITE_COGNITO_CLIENT_ID || "3h68pjtkucobvs9r3ojja7q7m",
   chatroomId: "",
-  model: "gpt-realtime",
+  model: DEFAULT_REALTIME_MODEL,
   voice: "marin",
   instructions:
     "あなたはJARVIS。落ち着いた有能なパーソナルAIアシスタントです。日本語で短く自然に話し、必要な時は機転の利いた軽いユーモアを添えてください。実行していない操作を完了したと言わないでください。",
@@ -24,7 +25,7 @@ export const defaults: ConnectionSettings = {
 export function loadSettings(): ConnectionSettings {
   try {
     const saved = JSON.parse(localStorage.getItem("jarvis.settings") || "{}");
-    return {
+    const settings = {
       ...defaults,
       ...Object.fromEntries(
         Object.keys(defaults)
@@ -32,13 +33,19 @@ export function loadSettings(): ConnectionSettings {
           .map((k) => [k, saved[k]]),
       ),
     };
+    // Upgrade old defaults once; explicit choices saved by this version survive.
+    if (saved.realtimeModelVersion !== 1 &&
+        ["", "gpt-realtime", "gpt-realtime-2"].includes(settings.model)) {
+      settings.model = DEFAULT_REALTIME_MODEL;
+    }
+    return settings;
   } catch {
     return { ...defaults };
   }
 }
 export function saveSettings(value: ConnectionSettings) {
   const safe = Object.fromEntries(Object.keys(defaults).map(key => [key, value[key as keyof ConnectionSettings]]));
-  localStorage.setItem("jarvis.settings", JSON.stringify(safe));
+  localStorage.setItem("jarvis.settings", JSON.stringify({ ...safe, realtimeModelVersion: 1 }));
 }
 export function Settings({
   value,

@@ -42,7 +42,7 @@ const settings: RealtimeSettings = {
 	tenantId: 'tn_test',
 	token: 'token_test',
 	chatroomId: 'chatroom_test',
-	model: 'gpt-realtime-2',
+	model: 'gpt-realtime-2.1',
 	voice: 'marin',
 	instructions: 'You are JARVIS.',
 }
@@ -102,6 +102,28 @@ afterEach(() => {
 })
 
 describe('Realtime', () => {
+	it.each([
+		['', 'gpt-realtime-2.1'],
+		['gpt-realtime-2.1', 'gpt-realtime-2.1'],
+		['gpt-realtime-2', 'gpt-realtime-2'],
+	])('sends model %s as %s in the call request', async (model, expected) => {
+		const transport = makeTransport()
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response())
+		const client = new Realtime({ ...settings, model }, {}, {
+			fetch: fetchMock,
+			createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+			getUserMedia: vi.fn(async () => transport.stream),
+		})
+		try {
+			await client.start()
+			expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toMatchObject({
+				model: expected, provider: 'openai', sideband: true,
+			})
+		} finally {
+			await client.stop()
+		}
+	})
+
 	it('exchanges SDP through Tachyon, connects audio, handles mute and text', async () => {
 		const transport = makeTransport()
 		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response())

@@ -21,6 +21,8 @@ Tauri版のAPI通信には公式HTTPプラグインを使います。ブラウ�
 
 「会話をはじめる」でマイクを許可すると音声対話が始まります。接続後はテキスト入力もできます。終了でマイク、音声再生、WebRTCを解放します。
 
+既定の会話モデルは `gpt-realtime-2.1` です。[Tachyon PR #9325](https://github.com/quantum-box/tachyon-apps/pull/9325) を含むAPIが必要です。保存済みの旧既定値 `gpt-realtime` / `gpt-realtime-2` は読み込み時に2.1へ移行します。他のモデルは保持し、更新後に接続設定から手動でモデルを保存した場合は、その選択を次回以降も使います。対応issue: [PLT-4245](https://linear.app/issue/PLT-4245)。
+
 - 接続先などの設定はローカルに保存します。パスワード・トークンは保存しません。再起動後は再ログインします。access tokenは有効期限の30秒前から必要時に更新します。ログアウトで音声接続と認証情報を破棄し、このセッションのrefresh tokenを失効させます（失効APIはbest effort）。
 - 会話テキストは画面上のセッション内だけで保持します。Tachyon側の監査・履歴保存はサーバー設定に従います。
 - 音声は接続中にTachyonが仲介したOpenAI Realtimeへ送信されます。
