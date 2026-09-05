@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-// One architecture per invocation. Publish each architecture's manifest at its own stable URL.
+// One architecture per invocation. GitHub Releases use flat assets and a combined manifest.
 const target = process.argv[2];
 if (!['aarch64-apple-darwin', 'x86_64-apple-darwin'].includes(target)) {
   throw new Error('Usage: npm run release:desktop -- <aarch64-apple-darwin|x86_64-apple-darwin>');
@@ -26,7 +26,14 @@ const cargo = readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version = "([
 if (config.version !== pkg.version || cargo !== pkg.version) throw new Error('package.json, Cargo.toml and tauri.conf.json versions must match');
 const arch = target.split('-')[0];
 const platform = `darwin-${arch}`;
-const endpoint = new URL('{{target}}-{{arch}}/latest.json', base).href.replaceAll('%7B', '{').replaceAll('%7D', '}');
+const githubReleases = base.hostname === 'github.com' && /^\/[^/]+\/[^/]+\/releases\/$/.test(base.pathname);
+const archiveName = `JARVIS_${pkg.version}_${platform}.app.tar.gz`;
+const endpoint = githubReleases
+  ? new URL('latest/download/latest.json', base).href
+  : new URL('{{target}}-{{arch}}/latest.json', base).href.replaceAll('%7B', '{').replaceAll('%7D', '}');
+const archiveUrl = githubReleases
+  ? new URL(`download/v${pkg.version}/${archiveName}`, base).href
+  : new URL(`${platform}/${pkg.version}/JARVIS.app.tar.gz`, base).href;
 const temp = mkdtempSync(join(tmpdir(), 'jarvis-release-'));
 try {
   const configPath = join(temp, 'updater.json');
@@ -35,16 +42,18 @@ try {
   if (build.status !== 0) throw new Error(`Tauri build failed (${build.status})`);
   const bundle = resolve(`src-tauri/target/${target}/release/bundle/macos/JARVIS.app.tar.gz`);
   const output = resolve(`artifacts/updates/${platform}`);
-  mkdirSync(join(output, pkg.version), { recursive: true });
-  copyFileSync(bundle, join(output, pkg.version, 'JARVIS.app.tar.gz'));
-  copyFileSync(`${bundle}.sig`, join(output, pkg.version, 'JARVIS.app.tar.gz.sig'));
+  const archiveDir = githubReleases ? output : join(output, pkg.version);
+  const outputArchiveName = githubReleases ? archiveName : 'JARVIS.app.tar.gz';
+  mkdirSync(archiveDir, { recursive: true });
+  copyFileSync(bundle, join(archiveDir, outputArchiveName));
+  copyFileSync(`${bundle}.sig`, join(archiveDir, `${outputArchiveName}.sig`));
   const signature = readFileSync(`${bundle}.sig`, 'utf8').trim();
   if (!signature) throw new Error('Missing updater signature');
-  writeFileSync(join(output, 'latest.json'), JSON.stringify({
+  writeFileSync(join(output, githubReleases ? `manifest-${platform}.json` : 'latest.json'), JSON.stringify({
     version: pkg.version,
     notes: process.env.JARVIS_RELEASE_NOTES || '',
     pub_date: new Date().toISOString(),
-    platforms: { [platform]: { signature, url: new URL(`${platform}/${pkg.version}/JARVIS.app.tar.gz`, base).href } },
+    platforms: { [platform]: { signature, url: archiveUrl } },
   }, null, 2) + '\n');
   console.log(`Signed update artifacts: ${output}`);
 } finally {

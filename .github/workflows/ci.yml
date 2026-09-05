@@ -93,6 +93,11 @@ jobs:
       - run: npm run build
       - name: Clippy
         run: cargo +stable clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Compile updater-enabled configuration
+        run: cargo +stable check --manifest-path src-tauri/Cargo.toml --locked
+        env:
+          # Compile-only configuration; never used in distributable bundles.
+          TAURI_CONFIG: '{"plugins":{"updater":{"pubkey":"compile-check-only","endpoints":["https://updates.example.invalid/latest.json"]}}}'
       - name: Rust tests
         run: cargo +stable test --manifest-path src-tauri/Cargo.toml --locked --all-targets
       - name: Build macOS application

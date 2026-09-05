@@ -48,3 +48,12 @@ it('rejects a version mismatch before building', () => {
   const f = fixture(); writeFileSync(join(f.root, 'src-tauri/Cargo.toml'), 'version = "0.1.0"\n');
   const result = f.run(); expect(result.status).not.toBe(0); expect(result.stderr).toContain('versions must match');
 });
+it('uses GitHub Releases flat assets and a shared latest manifest URL', () => {
+  const f = fixture(); const result = f.run({ JARVIS_UPDATE_BASE_URL: 'https://github.com/quantum-box/jarvis/releases/' });
+  expect(result.status, result.stderr).toBe(0);
+  const config = JSON.parse(readFileSync(join(f.root, 'captured-config.json'), 'utf8'));
+  expect(config.plugins.updater.endpoints).toEqual(['https://github.com/quantum-box/jarvis/releases/latest/download/latest.json']);
+  const manifest = JSON.parse(readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/manifest-darwin-aarch64.json'), 'utf8'));
+  expect(manifest.platforms['darwin-aarch64'].url).toBe('https://github.com/quantum-box/jarvis/releases/download/v0.2.0/JARVIS_0.2.0_darwin-aarch64.app.tar.gz');
+  expect(readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/JARVIS_0.2.0_darwin-aarch64.app.tar.gz'), 'utf8')).toBe('fixture archive');
+});
