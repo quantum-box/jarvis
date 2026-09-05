@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  rust-format:
+    name: Rust format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - run: cargo +stable fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Check workflows
+        run: '"$(go env GOPATH)/bin/actionlint" -color'
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Cache Rust dependencies
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml') }}
+      - run: npm ci
+      - run: npm run build
+      - name: Clippy
+        run: cargo +stable clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo +stable test --manifest-path src-tauri/Cargo.toml --locked --all-targets
+      - name: Build macOS application
+        run: npm run tauri build -- --bundles app --no-sign --ci -- --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+      - name: Validate and archive application
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          app=src-tauri/target/release/bundle/macos/JARVIS.app
+          plutil -lint "$app/Contents/Info.plist"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          lipo "$app/Contents/MacOS/$executable" -verify_arch "$EXPECTED_ARCH"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "JARVIS-$EXPECTED_ARCH.zip"
+      - name: Upload unsigned test application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: JARVIS-macos-${{ matrix.arch }}
+          path: JARVIS-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  ci:
+    name: CI passed
+    if: always()
+    needs: [frontend, rust-format, workflow-lint, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")'

@@ -3,6 +3,8 @@ dist/
 artifacts/
 src-tauri/target/
 src-tauri/gen/schemas/
+src-tauri/gen/apple/
+src-tauri/gen/android/
 .env
 .env.*
 !.env.example

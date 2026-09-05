@@ -1,0 +1,111 @@
+name: Mobile CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    name: iOS Simulator (arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install native tools
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-apple-ios-sim
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+      - run: npm ci
+      - run: npm run mobile:ios:init
+      - name: Build simulator archive without signing
+        run: npm run tauri ios build -- --debug --target aarch64-sim --no-sign --archive-only --ci -- --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+      - name: Verify simulator app
+        run: |
+          app=src-tauri/gen/apple/build/jarvis_iOS.xcarchive/Products/Applications/JARVIS.app
+          plutil -lint "$app/Info.plist"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
+          lipo "$app/$executable" -verify_arch arm64
+          platform=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms:0' "$app/Info.plist")
+          test "$platform" = iPhoneSimulator
+          /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$app/Info.plist"
+          ditto -c -k --sequesterRsrc --keepParent "$app" JARVIS-ios-simulator-arm64.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: JARVIS-ios-simulator-arm64
+          path: JARVIS-ios-simulator-arm64.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  android:
+    name: Android APK (arm64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install Android and Rust targets
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          rustup toolchain install stable --profile minimal --target aarch64-linux-android
+      - run: npm ci
+      - run: npm run mobile:android:init
+      - name: Build debug APK
+        run: npm run tauri android build -- --debug --target aarch64 --apk --ci -- --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+      - name: Verify APK permissions and architecture
+        run: |
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -type f)
+          test "${#apks[@]}" -eq 1
+          apk=${apks[0]}
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > /tmp/jarvis-apk.txt
+          grep -F "native-code: 'arm64-v8a'" /tmp/jarvis-apk.txt
+          grep -F "android.permission.RECORD_AUDIO" /tmp/jarvis-apk.txt
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: JARVIS-android-arm64-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 3
+
+  mobile:
+    name: Mobile CI passed
+    if: always()
+    needs: [ios, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require both mobile builds
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")'
