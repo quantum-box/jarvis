@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { LogIn, ShieldCheck, X } from 'lucide-react';
+import { LogIn, X } from 'lucide-react';
 import type { AuthSession, AuthResult } from '../lib/auth';
 
 export function Login({ auth, onAuthenticated, onClose }: { auth: AuthSession; onAuthenticated: () => Promise<void>; onClose: () => void }) {
@@ -40,6 +40,5 @@ export function Login({ auth, onAuthenticated, onClose }: { auth: AuthSession; o
       </>}
     </div>{error && <p className="error-banner" role="alert">{error}</p>}
     <button className="primary full" disabled={pending}><LogIn size={17}/>{pending ? '確認しています…' : credentialsAccepted ? '接続を再試行' : challenge ? '認証を続ける' : 'ログイン'}</button></form>
-    <p className="privacy-note"><ShieldCheck size={17}/><span>パスワードはCognitoへ直接送信します。パスワード・トークンは端末に保存しません。</span></p>
   </dialog>;
 }
