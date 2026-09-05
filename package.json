@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
