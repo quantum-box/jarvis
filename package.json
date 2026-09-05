@@ -31,7 +31,7 @@
     "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.5.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "@webgpu/types": "^0.1.60",
     "typescript": "~5.8.3",
     "vite": "^6.3.0",
