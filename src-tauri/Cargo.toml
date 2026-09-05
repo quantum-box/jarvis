@@ -1,0 +1,20 @@
+[package]
+name = "jarvis"
+version = "0.1.0"
+description = "JARVIS desktop shell"
+authors = ["Quantum Box"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0", features = [] }
+tauri-plugin-http = { version = "2.0.0" }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

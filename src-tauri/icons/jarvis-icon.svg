@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="core" cx="50%" cy="46%" r="52%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.18" stop-color="#d9fbff"/>
+      <stop offset="0.42" stop-color="#42e8ff"/>
+      <stop offset="0.74" stop-color="#1684cf"/>
+      <stop offset="1" stop-color="#071425"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#d9fbff"/>
+      <stop offset="0.45" stop-color="#35d9ff"/>
+      <stop offset="1" stop-color="#1764d1"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="#050b16"/>
+  <circle cx="512" cy="512" r="330" fill="none" stroke="#0e2946" stroke-width="62"/>
+  <circle cx="512" cy="512" r="330" fill="none" stroke="url(#ring)" stroke-width="26" stroke-linecap="round" stroke-dasharray="930 1140" transform="rotate(-28 512 512)" filter="url(#glow)"/>
+  <path d="M512 154 590 394 846 432 648 590 704 846 512 704 320 846 376 590 178 432 434 394Z" fill="#09192c" stroke="#34dcff" stroke-width="16" stroke-linejoin="round" opacity=".96"/>
+  <circle cx="512" cy="512" r="176" fill="url(#core)" filter="url(#glow)"/>
+  <circle cx="512" cy="512" r="112" fill="#bffaff" opacity=".88"/>
+  <circle cx="512" cy="512" r="76" fill="#ffffff"/>
+  <circle cx="512" cy="512" r="318" fill="none" stroke="#89f5ff" stroke-width="4" opacity=".7" stroke-dasharray="2 28"/>
+</svg>

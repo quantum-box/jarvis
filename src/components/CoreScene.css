@@ -1,0 +1,75 @@
+.jarvis-core {
+  --core-level: 0;
+  --core-active: .35;
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  min-height: 320px;
+  height: min(68vh, 720px);
+  overflow: hidden;
+  background: #080b10;
+}
+.jarvis-core__canvas, .jarvis-core__fallback {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.jarvis-core__canvas { z-index: 1; opacity: 0; transition: opacity 420ms; }
+.jarvis-core[data-renderer="webgpu"] .jarvis-core__canvas { opacity: 1; }
+.jarvis-core[data-renderer="webgpu"] .jarvis-core__fallback { opacity: 0; }
+.jarvis-core__fallback {
+  transition: opacity 420ms;
+  background: radial-gradient(ellipse at center, #6b3c0818, transparent 60%);
+  perspective: 700px;
+}
+.jarvis-core__fallback-grid {
+  position: absolute;
+  width: min(75%, 360px);
+  aspect-ratio: 1;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: repeating-conic-gradient(from 15deg, #f1a42690 0deg .3deg, transparent .4deg 9deg);
+  mask-image: repeating-radial-gradient(circle, #000 0 1px, transparent 2px 13px);
+  filter: drop-shadow(0 0 4px #ffa520);
+}
+.jarvis-core__fallback-halo {
+  position: absolute; top: 50%; left: 50%;
+  width: 360px; aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle, #ffc96528, #d96b070e 45%, transparent 70%);
+  transform: translate(-50%, -50%);
+  opacity: calc(.5 + var(--core-level) * .5);
+}
+.jarvis-core__fallback-ring {
+  position: absolute; top: 50%; left: 50%;
+  width: min(72%, 340px); aspect-ratio: 1;
+  border: 1px solid #e5a029;
+  border-radius: 50%;
+  background: repeating-conic-gradient(#fdbb4160 0deg 1deg, transparent 1deg 8deg);
+  mask-image: radial-gradient(circle, transparent 64%, black 66%, black 70%, transparent 72%);
+  filter: drop-shadow(0 0 5px #eaa332);
+  animation: jarvis-orbit 28s linear infinite;
+}
+.jarvis-core__fallback-ring--inner { width: min(62%, 280px); animation: jarvis-orbit-cross 23s linear infinite; }
+.jarvis-core__fallback-sphere {
+  position: absolute; top: 50%; left: 50%;
+  width: 64px; aspect-ratio: 1; border-radius: 50%;
+  border: 1px solid #ffe5a0;
+  background: repeating-radial-gradient(circle, transparent 0 4px, #f8b942 5px 6px, transparent 7px 9px);
+  box-shadow: 0 0 22px #ffc74b80, inset 0 0 20px #ffa32555;
+  transform: translate(-50%, -50%) scale(calc(1 + var(--core-level) * .2));
+}
+.jarvis-core__fallback-sphere span { position: absolute; inset: 40%; border-radius: 50%; background: #fff5c5; box-shadow: 0 0 18px 6px #ffbb43; }
+.jarvis-core__fallback-scan { position: absolute; inset: 0; background: repeating-linear-gradient(transparent 0 3px, #090b1030 3px 4px); pointer-events: none; }
+.jarvis-core__status { position: absolute; right: 20px; bottom: 16px; z-index: 3; color: #9b8356; font: 500 9px/1.2 Barlow, sans-serif; letter-spacing: .16em; pointer-events: none; }
+@keyframes jarvis-orbit { from { transform: translate(-50%, -50%) rotateZ(-25deg) rotateY(60deg) rotateZ(0deg); } to { transform: translate(-50%, -50%) rotateZ(-25deg) rotateY(60deg) rotateZ(360deg); } }
+@keyframes jarvis-orbit-cross { from { transform: translate(-50%, -50%) rotateZ(40deg) rotateY(55deg) rotateZ(360deg); } to { transform: translate(-50%, -50%) rotateZ(40deg) rotateY(55deg) rotateZ(0deg); } }
+@media (prefers-reduced-motion: reduce) { .jarvis-core__fallback-ring { animation: none; } .jarvis-core__canvas, .jarvis-core__fallback { transition: none; } }
+.jarvis-core__fallback { transform: scale(.88); transition: opacity 420ms, transform 350ms ease-out, filter 350ms; }
+.jarvis-core[data-activity="thinking"] .jarvis-core__fallback { transform: scale(.96); filter: brightness(1.25); }
+.jarvis-core[data-activity="thinking"] .jarvis-core__fallback-ring { animation-duration: 5s; }
+.jarvis-core[data-activity="speaking"] .jarvis-core__fallback { transform: scale(calc(.98 + var(--core-level) * .18)); filter: brightness(calc(1.15 + var(--core-level) * .6)); }
+.jarvis-core[data-activity="speaking"] .jarvis-core__fallback-ring { animation-duration: 12s; }
+@media (prefers-reduced-motion: reduce) { .jarvis-core__fallback { transform: none !important; transition: none; filter: none !important; } }
