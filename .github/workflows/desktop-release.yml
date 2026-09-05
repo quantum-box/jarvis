@@ -1,0 +1,47 @@
+name: Build signed desktop updates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS update (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: rustup toolchain install stable --profile minimal
+      - run: rustup target add ${{ matrix.target }} --toolchain stable
+      - run: npm ci
+      - run: npm test
+      - name: Build signed updater archive and manifest
+        run: npm run release:desktop -- ${{ matrix.target }}
+        env:
+          RUSTUP_TOOLCHAIN: stable
+          JARVIS_UPDATE_BASE_URL: ${{ vars.JARVIS_UPDATE_BASE_URL }}
+          JARVIS_UPDATER_PUBLIC_KEY: ${{ vars.JARVIS_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: JARVIS-update-${{ matrix.target }}
+          path: artifacts/updates/
+          if-no-files-found: error
+          retention-days: 7
