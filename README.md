@@ -164,11 +164,30 @@ versioned archives first and each architecture's `latest.json` last. Serve JSON 
 cache lifetime. Both manifests use their archive's actual signature. Never overwrite archives
 for an already published version. The app only accepts a newer version with a valid signature.
 
-The **Build signed desktop updates** workflow prepares both macOS architectures as Actions
-artifacts on manual dispatch. Configure the two `JARVIS_*` repository variables and two
-`TAURI_*` signing secrets above through the organization's approved governance/secret workflow.
-This change does not create repository settings, upload keys, publish releases, or provision
-hosting. The build job has only `contents: read` permission.
+The **Publish signed desktop updates** workflow is manually dispatched on `main`.
+It builds both macOS architectures, validates and combines their manifests, uploads a
+complete draft release, and only then makes it public. Only the publish job has
+`contents: write`; it uses the ephemeral `GITHUB_TOKEN`, never a persisted CLI token.
+Published versions and tags pointing to a different commit are rejected. A draft for the
+same commit can be retried without exposing a partial update.
+
+For the GitHub Releases distribution, governance manages:
+
+- `JARVIS_UPDATE_BASE_URL`: `https://github.com/quantum-box/jarvis/releases/`
+- `JARVIS_UPDATER_PUBLIC_KEY`: the dedicated updater public key
+- Required secret name: `TAURI_SIGNING_PRIVATE_KEY`; its value is stored separately
+  in 1Password and GitHub Actions Secrets, never in Terraform state.
+
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional if the source key is password protected.
+The updater checks `https://github.com/quantum-box/jarvis/releases/latest/download/latest.json`.
+GitHub assets have flat names such as `JARVIS_0.1.1_darwin-aarch64.app.tar.gz`, while
+archive URLs are pinned to `releases/download/v0.1.1/`. The generic HTTPS directory
+layout above remains supported for non-GitHub hosting. Release notes are maintained in
+`docs/desktop-release-notes.md`.
+
+The workflow does not configure Apple Developer ID signing or notarization. Tauri updater
+signatures verify update authenticity; they do not remove macOS Gatekeeper requirements
+for first-time installation. Do not publish until the signing key has a durable backup.
 
 Before publishing, verify an installed older updater-enabled app against a higher signed
 version, including download, install, restart, version change, and settings persistence.

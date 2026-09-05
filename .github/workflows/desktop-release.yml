@@ -1,4 +1,4 @@
-name: Build signed desktop updates
+name: Publish signed desktop updates
 
 on:
   workflow_dispatch:
@@ -6,8 +6,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     name: macOS update (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -29,6 +34,14 @@ jobs:
           cache: npm
       - run: rustup toolchain install stable --profile minimal
       - run: rustup target add ${{ matrix.target }} --toolchain stable
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: desktop-release-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: desktop-release-${{ runner.arch }}-
       - run: npm ci
       - run: npm test
       - name: Build signed updater archive and manifest
@@ -45,3 +58,49 @@ jobs:
           path: artifacts/updates/
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: JARVIS-update-*
+          path: artifacts/updates
+          merge-multiple: true
+      - name: Validate and combine manifests
+        run: node scripts/assemble-desktop-release.mjs
+        env:
+          JARVIS_UPDATE_BASE_URL: ${{ vars.JARVIS_UPDATE_BASE_URL }}
+      - name: Publish complete release atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
+          tag="v$version"
+          # An API outage must fail, not be mistaken for a missing release.
+          gh api --paginate "repos/$GH_REPO/releases" --jq '.[] | {tag: .tag_name, draft: .draft, target: .target_commitish}' > /tmp/jarvis-releases.jsonl
+          gh api "repos/$GH_REPO/git/matching-refs/tags/$tag" > /tmp/jarvis-tag-refs.json
+          jq -e --arg ref "refs/tags/$tag" --arg sha "$RELEASE_SHA" '[.[] | select(.ref == $ref)] | all(.object.type == "commit" and .object.sha == $sha)' /tmp/jarvis-tag-refs.json > /dev/null
+          existing=$(jq -s --arg tag "$tag" '[.[] | select(.tag == $tag)][0] // empty' /tmp/jarvis-releases.jsonl)
+          if [[ -n "$existing" ]]; then
+            jq -e --arg sha "$RELEASE_SHA" '.draft == true and .target == $sha' <<< "$existing" > /dev/null
+          else
+            gh release create "$tag" --draft --target "$RELEASE_SHA" --title "JARVIS $version" --notes-file docs/desktop-release-notes.md
+          fi
+          gh release upload "$tag" artifacts/release/* --clobber
+          gh release edit "$tag" --draft=false --latest
