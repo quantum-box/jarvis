@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X, ShieldCheck } from "lucide-react";
 import { DEFAULT_REALTIME_MODEL } from "../lib/realtime";
 export interface ConnectionSettings {
@@ -49,12 +49,14 @@ export function saveSettings(value: ConnectionSettings) {
 }
 export function Settings({
   value,
+  appUpdate,
   onChange,
   onClose,
   signedIn = false,
   tenants = [],
 }: {
   value: ConnectionSettings;
+  appUpdate?: ReactNode;
   onChange: (v: ConnectionSettings) => void;
   onClose: () => void;
   signedIn?: boolean;
@@ -109,6 +111,7 @@ export function Settings({
       <p className="muted">
         Tachyonの接続先と、利用するテナントを設定してください。
       </p>
+      {appUpdate}
       <div className="settings-fields">
         {field("baseUrl", "Tachyon API URL", "https://api.n1.tachy.one")}
         {tenants.length ? <label>利用するテナント<select value={value.tenantId} onChange={e => onChange({...value, tenantId: e.target.value, chatroomId: ''})}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label> : field("tenantId", "Tenant ID", "ログイン後に取得します")}

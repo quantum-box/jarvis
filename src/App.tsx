@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { fetch as nativeFetch } from "@tauri-apps/plugin-http";
 import {
@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import { CoreScene } from "./components/CoreScene";
 import { Settings, loadSettings } from "./components/Settings";
+import { UpdateController } from "./lib/updater";
+import { AppUpdate } from "./components/AppUpdate";
 import { Login } from './components/Login';
 import { AuthSession } from './lib/auth';
 import { apiOrigin, createChatroom, establishTachyonIdentity, userTokenFetch, type TachyonIdentity } from './lib/tachyon';
@@ -28,6 +30,9 @@ import {
 } from "./lib/realtime";
 
 export default function App() {
+  const [updater] = useState(() => new UpdateController());
+  const updateState = useSyncExternalStore(updater.subscribe, updater.getSnapshot);
+  useEffect(() => { void updater.initialize(); }, [updater]);
   const [settings, setSettings] = useState(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
   const [showConversation, setShowConversation] = useState(false);
@@ -103,6 +108,7 @@ export default function App() {
     finally { await auth?.logout(); }
   }
   async function connect() {
+    if (updater.blocksConversation) { setShowSettings(true); return; }
     const auth = authRef.current;
     if (!auth || !identity) { openLogin(); return; }
     if (
@@ -208,11 +214,12 @@ export default function App() {
           </span>
           <button
             className="icon-button"
-            aria-label="接続設定"
+            aria-label={updateState.phase === "available" ? "設定：更新があります" : "接続設定"}
             onClick={() => setShowSettings(true)}
             disabled={connected || busy}
           >
             <Settings2 size={18} />
+            {updateState.phase === "available" && <span className="update-dot" />}
           </button>
         </div>
       </header>
@@ -372,6 +379,7 @@ export default function App() {
       </div>
       {showSettings && (
         <Settings
+          appUpdate={<AppUpdate controller={updater} conversationActive={connected || busy} />}
           value={settings}
           onChange={setSettings}
           onClose={() => setShowSettings(false)}

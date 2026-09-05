@@ -12,13 +12,16 @@
     "typecheck": "tsc --noEmit",
     "mobile:android:init": "tauri android init --ci --skip-targets-install && python3 scripts/prepare-android.py",
     "mobile:ios:init": "tauri ios init --ci --skip-targets-install",
-    "test": "vitest run"
+    "test": "vitest run",
+    "release:desktop": "node scripts/desktop-release.mjs"
   },
   "dependencies": {
     "@fontsource/barlow": "^5.3.0",
     "@fontsource/manrope": "^5.3.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-http": "^2.6.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.11.0",
     "lucide-react": "^0.468.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

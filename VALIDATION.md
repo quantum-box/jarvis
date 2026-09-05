@@ -59,3 +59,22 @@ The browser preview does not imply native or authenticated audio proof. For the 
 - Moved CoreScene out of the content grid into a fixed viewport background. Enlarged canvas by 1.24, disabled background pointer events, and added foreground contrast gradients and a translucent conversation panel. CSS fallback also scales with viewport.
 - Actual browser screenshots reviewed with conversation closed and open: sphere remains at the same viewport location and size, panel overlaps it, and controls work. Existing signed-in session preserved during HMR. TypeScript/Vite build passed.
 - Native debug bundle passed and copied to artifacts/background/JARVIS.app; running applications left intact.
+
+## 2026-09-05 — desktop self update (PLT-4258)
+
+- `npm run typecheck`: passed.
+- `npm test`: 50 tests passed across 6 files. Includes 9 updater controller cases
+  and 6 release-script cases. Release-script tests emulate the builder and verify
+  manifest/config generation; they do not build or cryptographically sign an app.
+- `npm run build`: passed.
+- `cargo check --manifest-path src-tauri/Cargo.toml`: passed on this Apple Silicon Mac.
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings`: passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib`: passed (0 Rust unit tests).
+- Rust formatting, `actionlint`, `node --check scripts/desktop-release.mjs`, and `git diff --check`: passed.
+- Browser smoke at localhost:1431: opened Settings, verified the update section and
+  browser-only explanatory state visually. No authentication or production data mutation.
+- Not verified: configured native updater startup, real signed archive download/replacement/restart,
+  macOS Intel execution, mobile compilation, CI run, publication, Apple signing/notarization.
+  A protected signing key and stable HTTPS hosting must be configured before distribution.
+- Linear issue created through `tachyon linear issue create`, then marked In Progress.
+  No repository settings, signing secrets, hosting, or published releases were changed.

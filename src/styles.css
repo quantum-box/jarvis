@@ -677,3 +677,11 @@ button svg {
   .immersive-shell .main-stage { min-height: calc(100svh - 72px); padding-bottom: 36px; }
   .voice-dock .primary { padding: 0 18px; }
 }
+
+.app-update { margin: 24px 0; padding: 18px; border: 1px solid #5b513f; border-radius: 12px; }
+.app-update h3 { margin: 0; font-size: 15px; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.update-actions .primary { font-size: 12px; padding: 10px 14px; }
+.update-notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 180px; overflow-y: auto; }
+.app-update progress { max-width: 100%; accent-color: #d7b779; }
+.update-dot { width: 6px; height: 6px; border-radius: 50%; background: #d7b779; }
