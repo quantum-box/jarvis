@@ -111,10 +111,6 @@ export default function App() {
     try {
       apiOrigin(settings.baseUrl);
       const auth = authRef.current?.authenticated ? authRef.current : createAuth();
-      if (auth.authenticated) {
-        void finishLogin(auth).catch(e => setError(e instanceof Error ? e.message : '接続できませんでした。'));
-        return;
-      }
       setLoginSession(auth); setError('');
     } catch (e) { setError(e instanceof Error ? e.message : 'ログイン設定を確認してください。'); }
   }
@@ -144,6 +140,7 @@ export default function App() {
     finally { await auth?.logout(); }
   }
   async function connect() {
+    if (restoring) return;
     if (updater.blocksConversation) { setShowSettings(true); return; }
     const auth = authRef.current;
     if (!auth || !identity) { openLogin(); return; }
@@ -252,7 +249,7 @@ export default function App() {
             className="icon-button"
             aria-label={updateState.phase === "available" ? "設定：更新があります" : "接続設定"}
             onClick={() => setShowSettings(true)}
-            disabled={connected || busy}
+            disabled={connected || busy || restoring}
           >
             <Settings2 size={18} />
             {updateState.phase === "available" && <span className="update-dot" />}
@@ -413,7 +410,7 @@ export default function App() {
           </form>
         </aside>
       </div>
-      {showSettings && (
+      {showSettings && !restoring && (
         <Settings
           appUpdate={<AppUpdate controller={updater} conversationActive={connected || busy} />}
           value={settings}

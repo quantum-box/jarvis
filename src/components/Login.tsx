@@ -10,7 +10,7 @@ export function Login({ auth, onAuthenticated, onClose }: { auth: AuthSession; o
   const [answer, setAnswer] = useState('');
   const [attributes, setAttributes] = useState<Record<string, string>>({});
   const [challenge, setChallenge] = useState<Extract<AuthResult, {status: 'challenge'}>['challenge'] | null>(null);
-  const [credentialsAccepted, setCredentialsAccepted] = useState(false);
+  const [credentialsAccepted, setCredentialsAccepted] = useState(auth.authenticated);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => { mounted.current = true; dialog.current?.showModal(); return () => { mounted.current = false; }; }, []);
@@ -21,12 +21,25 @@ export function Login({ auth, onAuthenticated, onClose }: { auth: AuthSession; o
     setPassword(''); setAnswer('');
     try {
       if (credentialsAccepted && auth.authenticated) { await onAuthenticated(); return; }
+      if (credentialsAccepted) { setCredentialsAccepted(false); setChallenge(null); return; }
       const result = challenge ? await auth.respond(challenge, secret, attributes) : await auth.login(username.trim(), secret);
       if (!mounted.current) return;
       if (result.status === 'challenge') { setChallenge(result.challenge); setAttributes({}); }
       else { setCredentialsAccepted(true); await onAuthenticated(); }
     } catch (e) {
       if (mounted.current) setError(e instanceof Error ? e.message : 'ログインできませんでした。');
+    } finally { if (mounted.current) setPending(false); }
+  }
+  async function switchAccount() {
+    if (pending) return;
+    setPending(true); setError('');
+    try {
+      await auth.logout();
+      if (!mounted.current) return;
+      setCredentialsAccepted(false); setChallenge(null); setAttributes({});
+      setUsername(''); setPassword(''); setAnswer('');
+    } catch (e) {
+      if (mounted.current) setError(e instanceof Error ? e.message : String(e));
     } finally { if (mounted.current) setPending(false); }
   }
   const newPassword = challenge?.name === 'NEW_PASSWORD_REQUIRED';
@@ -39,6 +52,7 @@ export function Login({ auth, onAuthenticated, onClose }: { auth: AuthSession; o
         {challenge.requiredAttributes.map(key => <label key={key}>{key}<input required value={attributes[key] || ''} onChange={e => setAttributes({...attributes, [key]: e.target.value})} disabled={pending}/></label>)}
       </>}
     </div>{error && <p className="error-banner" role="alert">{error}</p>}
-    <button className="primary full" disabled={pending}><LogIn size={17}/>{pending ? '確認しています…' : credentialsAccepted ? '接続を再試行' : challenge ? '認証を続ける' : 'ログイン'}</button></form>
+    <button className="primary full" disabled={pending}><LogIn size={17}/>{pending ? '確認しています…' : credentialsAccepted ? '接続を再試行' : challenge ? '認証を続ける' : 'ログイン'}</button>
+    {credentialsAccepted && <button type="button" className="secondary full" disabled={pending} onClick={() => void switchAccount()}>別のアカウントでログイン</button>}</form>
   </dialog>;
 }
