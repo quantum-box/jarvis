@@ -1,6 +1,6 @@
 [package]
 name = "jarvis"
-version = "0.1.2"
+version = "0.1.3"
 description = "JARVIS desktop shell"
 authors = ["Quantum Box"]
 license = "MIT"
@@ -27,3 +27,6 @@ tauri-plugin-process = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = "3.7"

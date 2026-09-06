@@ -5,6 +5,8 @@ import {
 	type AuthChallenge,
 	type AuthConfig,
 	type AuthFetch,
+	type SavedSession,
+	type SessionStore,
 } from './auth'
 
 const config: AuthConfig = {
@@ -311,3 +313,83 @@ function jwt(payload: Record<string, unknown>) {
 			.replace(/=+$/, '')
 	return `${encode({ alg: 'RS256' })}.${encode(payload)}.signature`
 }
+
+function memoryStore() {
+  let saved: SavedSession | null = null;
+  const store: SessionStore = {
+    load: vi.fn(async () => saved),
+    save: vi.fn(async value => { saved = {...value}; }),
+    clear: vi.fn(async () => { saved = null; }),
+  };
+  return store;
+}
+function authenticatedResponse(refreshToken?: string) {
+  return Response.json({AuthenticationResult: {
+    AccessToken: accessToken(), IdToken: jwt({token_use: 'id'}),
+    ...(refreshToken ? {RefreshToken: refreshToken} : {}),
+  }});
+}
+describe('persistent sessions', () => {
+  it('restores a new instance via refresh and stores no access token or password', async () => {
+    const store = memoryStore();
+    const first = new AuthSession(config, async () => authenticatedResponse('refresh'), undefined, store);
+    await first.login('test-user', 'password');
+    expect(await store.load()).toEqual({refreshToken: 'refresh', username: 'test-user'});
+    const fetcher = vi.fn<AuthFetch>(async () => authenticatedResponse('rotated'));
+    const restarted = new AuthSession(config, fetcher, undefined, store);
+    expect(await restarted.restore()).toBe(true);
+    expect(restarted.displayName).toBe('test-user');
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string).AuthParameters).toEqual({REFRESH_TOKEN: 'refresh'});
+    expect((await store.load())?.refreshToken).toBe('rotated');
+    await restarted.logout();
+    expect(await store.load()).toBeNull();
+    expect(await new AuthSession(config, fetcher, undefined, store).restore()).toBe(false);
+  });
+  it('keeps credentials after network failure and retries without a password', async () => {
+    const store = memoryStore();
+    await store.save({refreshToken: 'refresh', username: 'test-user'});
+    const fetcher = vi.fn<AuthFetch>().mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce(authenticatedResponse());
+    const session = new AuthSession(config, fetcher, undefined, store);
+    await expect(session.restore()).rejects.toMatchObject({code: 'network_error'});
+    expect(await store.load()).not.toBeNull();
+    await expect(session.getAccessToken()).resolves.toBe(accessToken());
+  });
+  it('preserves saved credentials if the provider returns a malformed response', async () => {
+    const store = memoryStore();
+    await store.save({refreshToken: 'refresh', username: 'test-user'});
+    const session = new AuthSession(config, async () => Response.json({}), undefined, store);
+    await expect(session.restore()).rejects.toMatchObject({code: 'invalid_provider_response'});
+    expect(await store.load()).not.toBeNull();
+  });
+  it('reports secure storage failures instead of claiming a persistent login', async () => {
+    const store = memoryStore();
+    store.save = vi.fn(async () => { throw new Error('Keychain unavailable'); });
+    const session = new AuthSession(config, async () => authenticatedResponse('refresh'), undefined, store);
+    await expect(session.login('test-user', 'password')).rejects.toThrow('Keychain unavailable');
+    expect(session.authenticated).toBe(false);
+  });
+  it('removes a revoked refresh token', async () => {
+    const store = memoryStore();
+    await store.save({refreshToken: 'revoked', username: 'test-user'});
+    const session = new AuthSession(config, async () => Response.json({__type: 'NotAuthorizedException'}, {status: 400}), undefined, store);
+    expect(await session.restore()).toBe(false);
+    expect(session.authenticated).toBe(false);
+    expect(await store.load()).toBeNull();
+  });
+  it('does not resurrect a session when logout races restoration', async () => {
+    const store = memoryStore();
+    await store.save({refreshToken: 'refresh', username: 'test-user'});
+    let resolve!: (response: Response) => void;
+    const fetcher = vi.fn<AuthFetch>().mockImplementationOnce(() => new Promise(r => {resolve = r}))
+      .mockResolvedValue(Response.json({}));
+    const session = new AuthSession(config, fetcher, undefined, store);
+    const restoring = session.restore();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    await session.logout();
+    resolve(authenticatedResponse('rotated'));
+    await expect(restoring).rejects.toMatchObject({code: 'session_changed'});
+    expect(await store.load()).toBeNull();
+    expect(session.authenticated).toBe(false);
+  });
+});
