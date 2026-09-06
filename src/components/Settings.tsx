@@ -156,7 +156,7 @@ export function Settings({
       <div className="privacy-note">
         <ShieldCheck size={18} />
         <span>
-          ログイン情報はメモリ内だけに保持します。接続先の変更にはログアウトが必要です。
+          接続先の変更にはログアウトが必要です。
         </span>
       </div>
       <button

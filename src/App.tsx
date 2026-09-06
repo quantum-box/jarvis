@@ -21,6 +21,7 @@ import { UpdateController } from "./lib/updater";
 import { AppUpdate } from "./components/AppUpdate";
 import { Login } from './components/Login';
 import { AuthSession } from './lib/auth';
+import { nativeSessionStore } from './lib/session-store';
 import { apiOrigin, createChatroom, establishTachyonIdentity, userTokenFetch, type TachyonIdentity } from './lib/tachyon';
 import {
   RealtimeClient,
@@ -69,16 +70,47 @@ export default function App() {
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ block: "nearest" });
   }, [messages, showConversation]);
-  function openLogin() {
-    if (!settings.cognitoClientId.trim()) { setError('接続設定にCognito public client IDを設定してください。'); setShowSettings(true); return; }
+  const restoration = useRef<Promise<boolean> | null>(null);
+  const [restoring, setRestoring] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
     try {
-      apiOrigin(settings.baseUrl);
-      const auth = new AuthSession({region: settings.cognitoRegion, clientId: settings.cognitoClientId}, isTauri() ? nativeFetch : fetch);
-      authRef.current = auth;
+      if (!restoration.current) {
+        const auth = createAuth();
+        restoration.current = auth.restore();
+      }
+      const auth = authRef.current!;
       authSubscription.current?.();
       authSubscription.current = auth.subscribe(() => {
         if (authRef.current === auth && !auth.authenticated) { setIdentity(null); stop(); }
       });
+      void restoration.current.then(async restored => {
+        if (!cancelled && restored && authRef.current) await finishLogin(authRef.current);
+      }).catch(e => {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'ログイン状態を復元できませんでした。');
+      }).finally(() => { if (!cancelled) setRestoring(false); });
+    } catch (e) {
+      setRestoring(false);
+      setError(e instanceof Error ? e.message : 'ログイン設定を確認してください。');
+    }
+    return () => { cancelled = true; };
+  }, []);
+  function createAuth() {
+    const config = {region: settings.cognitoRegion, clientId: settings.cognitoClientId};
+    const auth = new AuthSession(config, isTauri() ? nativeFetch : fetch, undefined, nativeSessionStore(config));
+    authRef.current = auth;
+    authSubscription.current?.();
+    authSubscription.current = auth.subscribe(() => {
+      if (authRef.current === auth && !auth.authenticated) { setIdentity(null); stop(); }
+    });
+    return auth;
+  }
+  function openLogin() {
+    if (restoring) return;
+    if (!settings.cognitoClientId.trim()) { setError('接続設定にCognito public client IDを設定してください。'); setShowSettings(true); return; }
+    try {
+      apiOrigin(settings.baseUrl);
+      const auth = authRef.current?.authenticated ? authRef.current : createAuth();
       setLoginSession(auth); setError('');
     } catch (e) { setError(e instanceof Error ? e.message : 'ログイン設定を確認してください。'); }
   }
@@ -108,6 +140,7 @@ export default function App() {
     finally { await auth?.logout(); }
   }
   async function connect() {
+    if (restoring) return;
     if (updater.blocksConversation) { setShowSettings(true); return; }
     const auth = authRef.current;
     if (!auth || !identity) { openLogin(); return; }
@@ -199,7 +232,7 @@ export default function App() {
         </div>
         <div className="top-right">
           <button ref={conversationToggle} className="icon-button" aria-label={showConversation ? '会話を閉じる' : '会話を開く'} aria-expanded={showConversation} aria-controls="conversation-panel" onClick={() => setShowConversation(v => !v)}><MessageSquare size={18}/></button>
-          <button className="account-button" aria-label={identity ? `${identity.user.username}からログアウト` : "Tachyonにログイン"} title={identity ? "ログアウト" : "Tachyonにログイン"} onClick={() => { if (identity) void logout().catch(() => setError('端末からログアウトしました。サーバーでのトークン失効は確認できませんでした。')); else openLogin(); }} disabled={busy}>{identity ? <LogOut size={15}/> : <LogIn size={15}/>}<span>{identity ? identity.user.username : 'Tachyonにログイン'}</span></button>
+          <button className="account-button" aria-label={identity ? `${identity.user.username}からログアウト` : "Tachyonにログイン"} title={identity ? "ログアウト" : "Tachyonにログイン"} onClick={() => { if (identity) void logout().catch(e => setError(e instanceof Error ? e.message : String(e))); else openLogin(); }} disabled={busy || restoring}>{identity ? <LogOut size={15}/> : <LogIn size={15}/>}<span>{identity ? identity.user.username : restoring ? 'ログイン状態を復元中' : 'Tachyonにログイン'}</span></button>
           <time>
             {now.toLocaleTimeString("ja-JP", {
               timeZone: "Asia/Tokyo",
@@ -216,7 +249,7 @@ export default function App() {
             className="icon-button"
             aria-label={updateState.phase === "available" ? "設定：更新があります" : "接続設定"}
             onClick={() => setShowSettings(true)}
-            disabled={connected || busy}
+            disabled={connected || busy || restoring}
           >
             <Settings2 size={18} />
             {updateState.phase === "available" && <span className="update-dot" />}
@@ -377,7 +410,7 @@ export default function App() {
           </form>
         </aside>
       </div>
-      {showSettings && (
+      {showSettings && !restoring && (
         <Settings
           appUpdate={<AppUpdate controller={updater} conversationActive={connected || busy} />}
           value={settings}

@@ -1,3 +1,5 @@
+mod auth_store;
+
 #[tauri::command]
 fn update_availability(app: tauri::AppHandle) -> &'static str {
     if cfg!(mobile) {
@@ -13,7 +15,12 @@ fn update_availability(app: tauri::AppHandle) -> &'static str {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
-        .invoke_handler(tauri::generate_handler![update_availability])
+        .invoke_handler(tauri::generate_handler![
+            update_availability,
+            auth_store::load_auth_session,
+            auth_store::save_auth_session,
+            auth_store::clear_auth_session
+        ])
         .setup(|app| {
             #[cfg(desktop)]
             {

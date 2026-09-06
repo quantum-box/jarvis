@@ -1,9 +1,7 @@
 /**
  * Small Cognito public-client authentication adapter for JARVIS.
  *
- * Tokens deliberately live only on this instance.  The browser storage APIs
- * are not used so a desktop client never persists a Cognito session by
- * accident.
+ * Refresh credentials may be persisted through an injected secure store.
  */
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -45,6 +43,13 @@ export type AuthFetch = (
 	input: RequestInfo | URL,
 	init?: RequestInit,
 ) => Promise<Response>
+
+export interface SavedSession { refreshToken: string; username: string }
+export interface SessionStore {
+	load(): Promise<SavedSession | null>
+	save(session: SavedSession): Promise<void>
+	clear(): Promise<void>
+}
 
 export class AuthError extends Error {
 	readonly code: string
@@ -142,8 +147,8 @@ const normalizeRequiredAttributes = (value: unknown): string[] => {
 }
 
 /**
- * Holds one in-memory Cognito session and refreshes it when an access token
- * expires.  This class intentionally does not expose ID or refresh tokens.
+ * Holds a Cognito session, optionally restoring refresh credentials from a
+ * secure store. Access and ID tokens remain in memory.
  */
 export class AuthSession {
 	private readonly config: AuthConfig
@@ -158,11 +163,13 @@ export class AuthSession {
 	private pendingChallenge: AuthChallenge | null = null
 	private generation = 0
 	private refreshFlight: RefreshFlight | null = null
+	private storageFlight: Promise<void> = Promise.resolve()
 
 	constructor(
 		config: AuthConfig,
 		fetcher: AuthFetch = defaultFetch,
 		onChange?: () => void,
+		private readonly store?: SessionStore,
 	) {
 		this.config = validateAuthConfig(config)
 		// Call the injected function without binding AuthSession as its receiver.
@@ -173,7 +180,7 @@ export class AuthSession {
 
 	/** True when the session has credentials or a refresh path. */
 	get authenticated(): boolean {
-		if (!this.accessToken || !this.refreshToken) return false
+		if (!this.refreshToken) return false
 		// An expired access token remains an authenticated session while its
 		// refresh token is present. getAccessToken() performs the actual refresh.
 		return this.accessExpiresAt > Date.now() || Boolean(this.refreshToken)
@@ -187,6 +194,24 @@ export class AuthSession {
 	subscribe(listener: () => void): () => void {
 		this.listeners.add(listener)
 		return () => this.listeners.delete(listener)
+	}
+
+	/** Restore via Cognito, never trusting a cached access token. */
+	async restore(): Promise<boolean> {
+		if (!this.store) return false
+		const generation = this.generation
+		const saved = await this.store.load()
+		this.assertCurrent(generation)
+		if (!saved) return false
+		this.refreshToken = saved.refreshToken
+		this.userLabel = saved.username
+		try {
+			await this.getAccessToken()
+			return true
+		} catch (error) {
+			if (isInvalidRefreshError(error)) return false
+			throw error
+		}
 	}
 
 	async login(username: string, password: string): Promise<AuthResult> {
@@ -221,7 +246,7 @@ export class AuthSession {
 				response.AuthenticationResult,
 				true,
 			)
-			this.commitTokens(tokens, generation)
+			await this.commitTokens(tokens, generation)
 			return { status: 'authenticated' }
 		} catch (error) {
 			if (generation === this.generation) {
@@ -283,17 +308,17 @@ export class AuthSession {
 			response.AuthenticationResult,
 			true,
 		)
-		this.commitTokens(tokens, generation)
+		await this.commitTokens(tokens, generation)
 		return { status: 'authenticated' }
 	}
 
 	async getAccessToken(): Promise<string> {
 		const accessToken = this.accessToken
 		const refreshToken = this.refreshToken
-		if (!accessToken || !refreshToken) {
+		if (!refreshToken) {
 			throw new AuthError('認証が必要です。', 'not_authenticated')
 		}
-		if (this.accessExpiresAt - Date.now() > ACCESS_TOKEN_REFRESH_SKEW_MS) {
+		if (accessToken && this.accessExpiresAt - Date.now() > ACCESS_TOKEN_REFRESH_SKEW_MS) {
 			return accessToken
 		}
 
@@ -325,14 +350,21 @@ export class AuthSession {
 		this.clearLocal()
 		this.notify()
 
-		if (!refreshToken) return
 		try {
-			await this.request('RevokeToken', {
-				ClientId: this.config.clientId,
-				Token: refreshToken,
-			})
-		} catch {
-			// Local sign-out is authoritative. Revocation is a best-effort cleanup.
+			if (this.store) await this.persist(() => this.store!.clear())
+		} finally {
+			// Also attempt revocation if Keychain deletion fails. Preserve the
+			// deletion error so the UI cannot claim the saved session is gone.
+			if (refreshToken) {
+				try {
+					await this.request('RevokeToken', {
+						ClientId: this.config.clientId,
+						Token: refreshToken,
+					})
+				} catch {
+					// Revocation is best effort; never mask a storage error.
+				}
+			}
 		}
 	}
 
@@ -371,11 +403,14 @@ export class AuthSession {
 				refreshToken,
 			)
 			this.assertCurrent(generation)
-			this.commitTokens(tokens, generation)
+			await this.commitTokens(tokens, generation)
 			return tokens.accessToken
 		} catch (error) {
 			if (generation !== this.generation) throw error
-			if (isInvalidRefreshError(error)) this.invalidateSession()
+			if (isInvalidRefreshError(error)) {
+				this.invalidateSession()
+				if (this.store) await this.persist(() => this.store!.clear())
+			}
 			throw error
 		}
 	}
@@ -472,14 +507,25 @@ export class AuthSession {
 		return { name, session, username, requiredAttributes }
 	}
 
-	private commitTokens(tokens: NormalizedTokens, generation: number) {
+	private async commitTokens(tokens: NormalizedTokens, generation: number) {
 		this.assertCurrent(generation)
 		this.accessToken = tokens.accessToken
 		this.idToken = tokens.idToken
 		this.refreshToken = tokens.refreshToken
 		this.accessExpiresAt = tokens.expiresAt
 		this.pendingChallenge = null
+		if (this.store && tokens.refreshToken) {
+			const saved = { refreshToken: tokens.refreshToken, username: this.userLabel }
+			await this.persist(() => this.store!.save(saved))
+		}
+		this.assertCurrent(generation)
 		this.notify()
+	}
+
+	private persist(operation: () => Promise<void>): Promise<void> {
+		const next = this.storageFlight.then(operation)
+		this.storageFlight = next.catch(() => undefined)
+		return next
 	}
 
 	private clearLocal() {
@@ -611,8 +657,5 @@ const isInvalidRefreshError = (error: unknown) => {
 		'NotAuthorizedException',
 		'InvalidRefreshTokenException',
 		'UserNotFoundException',
-		'InvalidParameterException',
-		'invalid_access_token',
-		'invalid_provider_response',
 	]).has(error.code)
 }
