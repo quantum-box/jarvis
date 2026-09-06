@@ -350,15 +350,21 @@ export class AuthSession {
 		this.clearLocal()
 		this.notify()
 
-		if (this.store) await this.persist(() => this.store!.clear())
-		if (!refreshToken) return
 		try {
-			await this.request('RevokeToken', {
-				ClientId: this.config.clientId,
-				Token: refreshToken,
-			})
-		} catch {
-			// Local sign-out is authoritative. Revocation is a best-effort cleanup.
+			if (this.store) await this.persist(() => this.store!.clear())
+		} finally {
+			// Also attempt revocation if Keychain deletion fails. Preserve the
+			// deletion error so the UI cannot claim the saved session is gone.
+			if (refreshToken) {
+				try {
+					await this.request('RevokeToken', {
+						ClientId: this.config.clientId,
+						Token: refreshToken,
+					})
+				} catch {
+					// Revocation is best effort; never mask a storage error.
+				}
+			}
 		}
 	}
 

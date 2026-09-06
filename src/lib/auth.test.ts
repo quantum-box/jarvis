@@ -369,6 +369,16 @@ describe('persistent sessions', () => {
     await expect(session.login('test-user', 'password')).rejects.toThrow('Keychain unavailable');
     expect(session.authenticated).toBe(false);
   });
+  it('still revokes the token when Keychain deletion fails', async () => {
+    const store = memoryStore();
+    const fetcher = vi.fn<AuthFetch>(async () => authenticatedResponse('refresh'));
+    const session = new AuthSession(config, fetcher, undefined, store);
+    await session.login('test-user', 'password');
+    store.clear = vi.fn(async () => { throw new Error('Keychain locked'); });
+    await expect(session.logout()).rejects.toThrow('Keychain locked');
+    expect(session.authenticated).toBe(false);
+    expect(JSON.parse(fetcher.mock.calls.at(-1)![1]!.body as string)).toEqual({ClientId: config.clientId, Token: 'refresh'});
+  });
   it('removes a revoked refresh token', async () => {
     const store = memoryStore();
     await store.save({refreshToken: 'revoked', username: 'test-user'});
