@@ -1,12 +1,7 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Cookie, Globe2, Trash2 } from 'lucide-react'
-import {
-	isManagedBrowserAvailable,
-	loadBrowserAlwaysOnTop,
-	browserRequest,
-	saveBrowserAlwaysOnTop,
-} from '../lib/browser'
+import { Blend, Cookie, Globe2, Trash2 } from 'lucide-react'
+import { browserRequest, isManagedBrowserAvailable, loadBrowserOpacity, saveBrowserOpacity } from '../lib/browser'
 
 type ChromeProfile = { id: string; name: string }
 type ImportResult = {
@@ -23,9 +18,9 @@ export function BrowserSettings() {
 	const [profiles, setProfiles] = useState<ChromeProfile[]>([])
 	const [profile, setProfile] = useState('')
 	const [domain, setDomain] = useState('')
-	const [alwaysOnTop, setAlwaysOnTop] = useState(loadBrowserAlwaysOnTop)
 	const [busy, setBusy] = useState(false)
 	const [message, setMessage] = useState('')
+	const [opacity, setOpacity] = useState(loadBrowserOpacity)
 
 	useEffect(() => {
 		if (!available) return
@@ -85,28 +80,31 @@ export function BrowserSettings() {
 		}
 	}
 
+	function changeOpacity(value: number) {
+		const next = value / 100
+		setOpacity(next)
+		try {
+			saveBrowserOpacity(next)
+		} catch {
+			setMessage('透明度を端末に保存できませんでした。')
+		}
+		void browserRequest('set_opacity', { opacity: next })
+			.catch(error => setMessage(String(error)))
+	}
+
 	return (
 		<section className="browser-settings" aria-labelledby="browser-settings-title">
 			<div className="browser-settings-heading">
 				<Globe2 size={18} />
 				<div>
-					<h3 id="browser-settings-title">フローティングブラウザ</h3>
+					<h3 id="browser-settings-title">アプリ内ブラウザ</h3>
 					<p>Chromeの選択したサイトのCookieだけを、このMac上のJARVISへコピーします。</p>
 				</div>
 			</div>
-			<label className="toggle-row">
-				<input
-					type="checkbox"
-					checked={alwaysOnTop}
-					onChange={event => {
-						const value = event.target.checked
-						setAlwaysOnTop(value)
-						saveBrowserAlwaysOnTop(value)
-						void browserRequest('set_always_on_top', { alwaysOnTop: value })
-							.catch(error => setMessage(String(error)))
-					}}
-				/>
-				ブラウザを最前面に表示
+			<label className="browser-opacity">
+				<span><Blend size={15} /> ウィンドウの透明度</span>
+				<input aria-label="ウィンドウの透明度" type="range" min="35" max="100" step="5" value={Math.round(opacity * 100)} onChange={event => changeOpacity(Number(event.currentTarget.value))} />
+				<output>{Math.round(opacity * 100)}%</output>
 			</label>
 			<div className="field-row">
 				<label>

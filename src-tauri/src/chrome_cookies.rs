@@ -37,7 +37,7 @@ mod platform {
     use sha1::Sha1;
     use sha2::{Digest, Sha256};
     use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
-    use tauri::{Manager, WebviewWindow};
+    use tauri::{Manager, Webview};
     use zeroize::Zeroize;
 
     type Aes128CbcDec = cbc::Decryptor<Aes128>;
@@ -310,7 +310,7 @@ mod platform {
             .collect())
     }
 
-    fn set_cookie(browser: &WebviewWindow, row: &CookieRow, value: &str) -> Result<(), String> {
+    fn set_cookie(browser: &Webview, row: &CookieRow, value: &str) -> Result<(), String> {
         // NSHTTPCookie keeps an exact-host scope when Domain has no leading dot,
         // and a subdomain scope when it does. Chrome host_key uses the same distinction.
         let mut cookie = tauri::webview::Cookie::build((row.name.as_str(), value))
@@ -355,7 +355,7 @@ mod platform {
         let version = database_version(&connection);
         let rows = read_rows(&connection, &domain)?;
         drop(connection);
-        let browser = crate::browser::ensure_window(app, false)?;
+        let browser = crate::browser::ensure_webview(app, false)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -415,7 +415,7 @@ mod platform {
 
     pub async fn clear(app: &AppHandle, domain: String) -> Result<SiteDataClearResult, String> {
         let domain = normalize_domain(&domain)?;
-        let browser = crate::browser::ensure_window(app, false)?;
+        let browser = crate::browser::ensure_webview(app, false)?;
         let cookies = browser
             .cookies()
             .map_err(|_| "ブラウザのCookieを読み取れませんでした。".to_string())?;

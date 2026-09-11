@@ -1,34 +1,83 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::AppHandle;
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserStatus {
+    id: String,
     available: bool,
     open: bool,
+    visible: bool,
     url: Option<String>,
-    always_on_top: bool,
+    title: Option<String>,
+    bounds: Option<BrowserBounds>,
+    opacity: f64,
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Mutex, OnceLock,
     };
     use std::time::Duration;
     use tauri::{
         webview::{NewWindowResponse, PageLoadEvent},
-        Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+        Emitter, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Webview, WebviewBuilder,
+        WebviewUrl,
     };
     use tokio::sync::oneshot;
 
-    const LABEL: &str = "managed-browser";
+    const LABEL_PREFIX: &str = "managed-browser";
+    const STATUS_EVENT: &str = "managed-browser-status";
     const DEFAULT_URL: &str = "https://www.google.com/";
-    static FINISHED_PAGE_LOADS: AtomicU64 = AtomicU64::new(0);
-    static FINISHED_PAGE_URL: Mutex<String> = Mutex::new(String::new());
+    const FRAME_TOP: f64 = 92.0;
+    const FRAME_MARGIN: f64 = 16.0;
+    const FRAME_BORDER: f64 = 7.0;
+    const MACOS_TITLEBAR_HEIGHT: f64 = 28.0;
+    const MIN_FRAME_WIDTH: f64 = 520.0;
+    const MIN_FRAME_HEIGHT: f64 = 360.0;
+    const DEFAULT_WEBVIEW_OPACITY: f64 = 0.9;
+    const MIN_WEBVIEW_OPACITY: f64 = 0.35;
+    static BROWSER_CONTENT_VISIBLE: AtomicBool = AtomicBool::new(true);
+    static NEXT_BROWSER_ID: AtomicU64 = AtomicU64::new(1);
+    static ACTIVE_BROWSER: Mutex<Option<String>> = Mutex::new(None);
+    static BROWSER_OPACITY: Mutex<f64> = Mutex::new(DEFAULT_WEBVIEW_OPACITY);
+    static BROWSERS: OnceLock<Mutex<HashMap<String, BrowserMeta>>> = OnceLock::new();
+
+    #[derive(Clone)]
+    struct BrowserMeta {
+        visible: bool,
+        title: String,
+        bounds: BrowserBounds,
+        order: u64,
+        opacity: f64,
+        finished_page_loads: u64,
+        finished_page_url: String,
+    }
+
+    fn browsers() -> &'static Mutex<HashMap<String, BrowserMeta>> {
+        BROWSERS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn configured_opacity() -> f64 {
+        BROWSER_OPACITY
+            .lock()
+            .map(|opacity| *opacity)
+            .unwrap_or(DEFAULT_WEBVIEW_OPACITY)
+    }
 
     fn validate_url(value: &str) -> Result<tauri::Url, String> {
         let url = tauri::Url::parse(value).map_err(|_| "URLが正しくありません。".to_string())?;
@@ -42,9 +91,29 @@ mod platform {
         Ok(url)
     }
 
-    fn window(app: &AppHandle) -> Result<WebviewWindow, String> {
-        app.get_webview_window(LABEL)
-            .ok_or_else(|| "ブラウザを先に開いてください。".into())
+    fn active_id() -> Option<String> {
+        ACTIVE_BROWSER.lock().ok().and_then(|id| id.clone())
+    }
+
+    fn set_active(id: &str) {
+        if let Ok(mut active) = ACTIVE_BROWSER.lock() {
+            *active = Some(id.to_string());
+        }
+    }
+
+    fn webview_by_id(app: &AppHandle, id: &str) -> Result<Webview, String> {
+        app.get_webview(id)
+            .ok_or_else(|| "ブラウザが見つかりませんでした。".into())
+    }
+
+    fn webview(app: &AppHandle) -> Result<(String, Webview), String> {
+        let id = active_id().ok_or_else(|| "ブラウザを先に開いてください。".to_string())?;
+        let browser = webview_by_id(app, &id)?;
+        Ok((id, browser))
+    }
+
+    fn active_webview(app: &AppHandle) -> Result<Webview, String> {
+        webview(app).map(|(_, browser)| browser)
     }
 
     pub(crate) fn safe_url_summary(url: &tauri::Url) -> String {
@@ -64,12 +133,151 @@ mod platform {
             && current.fragment() != target.fragment()
     }
 
-    fn create_window(
+    fn constrain_bounds(
+        app: &AppHandle,
+        requested: Option<BrowserBounds>,
+    ) -> Result<BrowserBounds, String> {
+        let parent = app
+            .get_window("main")
+            .ok_or_else(|| "JARVISのメイン画面が見つかりませんでした。".to_string())?;
+        let scale = parent.scale_factor().unwrap_or(1.0);
+        let size = parent
+            .inner_size()
+            .map_err(|_| "JARVISの表示領域を確認できませんでした。".to_string())?;
+        let available_width = size.width as f64 / scale;
+        let available_height = size.height as f64 / scale;
+        let default_width = (available_width * 0.64).clamp(MIN_FRAME_WIDTH, 880.0);
+        let default_height = (available_height * 0.72).clamp(MIN_FRAME_HEIGHT, 720.0);
+        let fallback = BrowserBounds {
+            x: (available_width - default_width - FRAME_MARGIN * 2.0).max(FRAME_MARGIN),
+            y: FRAME_TOP,
+            width: default_width,
+            height: default_height.min(available_height - FRAME_TOP - FRAME_MARGIN),
+        };
+        let value = requested.unwrap_or(fallback);
+        let maximum_width = (available_width - FRAME_MARGIN * 2.0).max(MIN_FRAME_WIDTH);
+        let maximum_height = (available_height - FRAME_TOP - FRAME_MARGIN).max(MIN_FRAME_HEIGHT);
+        let width = value.width.clamp(MIN_FRAME_WIDTH, maximum_width);
+        let height = value.height.clamp(MIN_FRAME_HEIGHT, maximum_height);
+        Ok(BrowserBounds {
+            x: value.x.clamp(
+                FRAME_MARGIN,
+                (available_width - width - FRAME_MARGIN).max(FRAME_MARGIN),
+            ),
+            y: value.y.clamp(
+                FRAME_TOP,
+                (available_height - height - FRAME_MARGIN).max(FRAME_TOP),
+            ),
+            width,
+            height,
+        })
+    }
+
+    fn content_rect(app: &AppHandle, bounds: BrowserBounds) -> Result<Rect, String> {
+        let parent = app
+            .get_window("main")
+            .ok_or_else(|| "JARVISのメイン画面が見つかりませんでした。".to_string())?;
+        let scale = parent.scale_factor().unwrap_or(1.0);
+        let outer = parent
+            .outer_position()
+            .map_err(|_| "JARVISの表示位置を確認できませんでした。".to_string())?;
+        let inner = parent
+            .inner_position()
+            .map_err(|_| "JARVISの表示位置を確認できませんでした。".to_string())?;
+        let content_offset_x = (inner.x - outer.x) as f64 / scale;
+        // Child-webview positions are measured from the decorated NSWindow edge,
+        // while the parent webview's CSS coordinates begin below its titlebar.
+        // Tauri can report identical inner/outer origins for that configuration,
+        // so retain the native titlebar height as the minimum offset.
+        let content_offset_y = ((inner.y - outer.y) as f64 / scale).max(MACOS_TITLEBAR_HEIGHT);
+        Ok(Rect {
+            position: LogicalPosition::new(
+                bounds.x + FRAME_BORDER + content_offset_x,
+                bounds.y + FRAME_BORDER + content_offset_y,
+            )
+            .into(),
+            size: LogicalSize::new(
+                bounds.width - FRAME_BORDER * 2.0,
+                bounds.height - FRAME_BORDER * 2.0,
+            )
+            .into(),
+        })
+    }
+
+    fn apply_bounds(
+        app: &AppHandle,
+        id: &str,
+        browser: &Webview,
+        bounds: BrowserBounds,
+    ) -> Result<(), String> {
+        browser
+            .set_bounds(content_rect(app, bounds)?)
+            .map_err(|_| "ブラウザの位置と大きさを変更できませんでした。".to_string())?;
+        if let Ok(mut browsers) = browsers().lock() {
+            if let Some(meta) = browsers.get_mut(id) {
+                meta.bounds = bounds;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_status(app: &AppHandle, id: &str) {
+        if let Ok(status) = status_by_id(app, id) {
+            let _ = app.emit_to("main", STATUS_EVENT, status);
+        }
+    }
+
+    fn next_frame(app: &AppHandle, order: u64) -> Result<BrowserBounds, String> {
+        let base = constrain_bounds(app, None)?;
+        let step = ((order.saturating_sub(1)) % 5) as f64;
+        constrain_bounds(
+            app,
+            Some(BrowserBounds {
+                x: base.x - step * 46.0,
+                y: base.y + step * 38.0,
+                ..base
+            }),
+        )
+    }
+
+    fn apply_opacity(browser: &Webview, opacity: f64) -> Result<(), String> {
+        browser
+            .with_webview(move |webview| unsafe {
+                let view: &objc2_app_kit::NSView = &*webview.inner().cast();
+                view.setAlphaValue(opacity);
+            })
+            .map_err(|_| "ブラウザの透明度を変更できませんでした。".to_string())
+    }
+
+    fn raise(browser: &Webview) -> Result<(), String> {
+        browser
+            .with_webview(|webview| unsafe {
+                let view: &objc2_app_kit::NSView = &*webview.inner().cast();
+                if let Some(parent) = view.superview() {
+                    parent.addSubview_positioned_relativeTo(
+                        view,
+                        objc2_app_kit::NSWindowOrderingMode::Above,
+                        None,
+                    );
+                }
+            })
+            .map_err(|_| "ブラウザを手前に移動できませんでした。".to_string())
+    }
+
+    fn page_load_count(id: &str) -> u64 {
+        browsers()
+            .lock()
+            .ok()
+            .and_then(|browsers| browsers.get(id).map(|meta| meta.finished_page_loads))
+            .unwrap_or(0)
+    }
+
+    fn create_webview(
         app: &AppHandle,
         url: tauri::Url,
-        always_on_top: bool,
         visible: bool,
-    ) -> Result<WebviewWindow, String> {
+        bounds: Option<BrowserBounds>,
+    ) -> Result<(String, Webview), String> {
         let data_dir = app
             .path()
             .app_data_dir()
@@ -78,68 +286,120 @@ mod platform {
         std::fs::create_dir_all(&data_dir)
             .map_err(|_| "ブラウザ保存先を作成できませんでした。".to_string())?;
 
-        let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
-            .title("JARVIS Browser")
-            .inner_size(980.0, 720.0)
-            .min_inner_size(520.0, 420.0)
-            .position(72.0, 96.0)
-            .always_on_top(always_on_top)
-            .visible(visible)
+        let order = NEXT_BROWSER_ID.fetch_add(1, Ordering::AcqRel);
+        let id = format!("{LABEL_PREFIX}-{order}");
+        let opacity = configured_opacity();
+        let frame = match bounds {
+            Some(bounds) => constrain_bounds(app, Some(bounds))?,
+            None => next_frame(app, order)?,
+        };
+        let page_load_app = app.clone();
+        let page_load_id = id.clone();
+        let title_app = app.clone();
+        let title_id = id.clone();
+        let builder = WebviewBuilder::new(&id, WebviewUrl::External(url))
             .data_directory(data_dir)
             .on_navigation(|candidate| validate_url(candidate.as_str()).is_ok())
             .on_new_window(|_, _| NewWindowResponse::Deny)
             .on_download(|_, _| false)
-            .on_page_load(|_, payload| {
+            .on_page_load(move |_, payload| {
                 if payload.event() == PageLoadEvent::Finished {
-                    if let Ok(mut url) = FINISHED_PAGE_URL.lock() {
-                        *url = payload.url().to_string();
+                    if let Ok(mut browsers) = browsers().lock() {
+                        if let Some(meta) = browsers.get_mut(&page_load_id) {
+                            meta.finished_page_loads += 1;
+                            meta.finished_page_url = payload.url().to_string();
+                        }
                     }
-                    FINISHED_PAGE_LOADS.fetch_add(1, Ordering::Release);
+                    emit_status(&page_load_app, &page_load_id);
                 }
             })
-            .on_document_title_changed(|browser, title| {
+            .on_document_title_changed(move |_, title| {
                 let clean: String = title
                     .chars()
                     .filter(|c| !c.is_control())
                     .take(100)
                     .collect();
-                let window_title = if clean.is_empty() {
-                    "JARVIS Browser".to_string()
-                } else {
-                    format!("{} · JARVIS", clean)
-                };
-                let _ = browser.set_title(&window_title);
+                if let Ok(mut browsers) = browsers().lock() {
+                    if let Some(meta) = browsers.get_mut(&title_id) {
+                        meta.title = clean;
+                    }
+                }
+                emit_status(&title_app, &title_id);
             });
-        if let Some(parent) = app.get_webview_window("main") {
-            builder = builder
-                .parent(&parent)
-                .map_err(|_| "ブラウザをJARVISへ関連付けられませんでした。".to_string())?;
+        let parent = app
+            .get_window("main")
+            .ok_or_else(|| "JARVISのメイン画面が見つかりませんでした。".to_string())?;
+        let rect = content_rect(app, frame)?;
+        if let Ok(mut browsers) = browsers().lock() {
+            browsers.insert(
+                id.clone(),
+                BrowserMeta {
+                    visible,
+                    title: String::new(),
+                    bounds: frame,
+                    order,
+                    opacity,
+                    finished_page_loads: 0,
+                    finished_page_url: String::new(),
+                },
+            );
         }
-        builder
-            .build()
-            .map_err(|_| "ブラウザを開けませんでした。".to_string())
+        let browser = match parent.add_child(builder, rect.position, rect.size) {
+            Ok(browser) => browser,
+            Err(_) => {
+                if let Ok(mut browsers) = browsers().lock() {
+                    browsers.remove(&id);
+                }
+                return Err("アプリ内ブラウザを開けませんでした。".to_string());
+            }
+        };
+        if let Err(error) = apply_opacity(&browser, opacity) {
+            let _ = browser.close();
+            if let Ok(mut browsers) = browsers().lock() {
+                browsers.remove(&id);
+            }
+            return Err(error);
+        }
+        raise(&browser)?;
+        set_active(&id);
+        if !visible || !BROWSER_CONTENT_VISIBLE.load(Ordering::Acquire) {
+            browser
+                .hide()
+                .map_err(|_| "ブラウザを非表示にできませんでした。".to_string())?;
+        }
+        Ok((id, browser))
     }
 
-    pub fn ensure_window(app: &AppHandle, visible: bool) -> Result<WebviewWindow, String> {
-        if let Some(browser) = app.get_webview_window(LABEL) {
+    pub fn ensure_webview(app: &AppHandle, visible: bool) -> Result<Webview, String> {
+        if let Ok((id, browser)) = webview(app) {
             if visible {
+                if let Ok(mut browsers) = browsers().lock() {
+                    if let Some(meta) = browsers.get_mut(&id) {
+                        meta.visible = true;
+                    }
+                }
                 browser
                     .show()
                     .map_err(|_| "ブラウザを表示できませんでした。".to_string())?;
+                raise(&browser)?;
                 let _ = browser.set_focus();
             }
             return Ok(browser);
         }
-        create_window(app, validate_url(DEFAULT_URL)?, true, visible)
+        create_webview(app, validate_url(DEFAULT_URL)?, visible, None).map(|(_, browser)| browser)
     }
 
-    async fn wait_for_page_load(browser: &WebviewWindow, start: u64) -> Result<(), String> {
+    async fn wait_for_page_load(id: &str, browser: &Webview, start: u64) -> Result<(), String> {
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
-                if FINISHED_PAGE_LOADS.load(Ordering::Acquire) > start {
-                    let finished = FINISHED_PAGE_URL.lock().ok().map(|url| url.clone());
+                let finished = browsers().lock().ok().and_then(|browsers| {
+                    browsers
+                        .get(id)
+                        .map(|meta| (meta.finished_page_loads, meta.finished_page_url.clone()))
+                });
+                if let Some((_, finished)) = finished.filter(|(loads, _)| *loads > start) {
                     let current = browser.url().ok().map(|url| url.to_string());
-                    if finished.is_some() && finished == current {
+                    if Some(finished) == current {
                         break;
                     }
                 }
@@ -151,7 +411,8 @@ mod platform {
     }
 
     async fn wait_for_history_navigation(
-        browser: &WebviewWindow,
+        id: &str,
+        browser: &Webview,
         start: u64,
         previous_url: Option<String>,
     ) -> Result<(), String> {
@@ -159,9 +420,13 @@ mod platform {
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let current = browser.url().ok().map(|url| url.to_string());
-                if FINISHED_PAGE_LOADS.load(Ordering::Acquire) > start {
-                    let finished = FINISHED_PAGE_URL.lock().ok().map(|url| url.clone());
-                    if finished.is_some() && finished == current {
+                let finished = browsers().lock().ok().and_then(|browsers| {
+                    browsers
+                        .get(id)
+                        .map(|meta| (meta.finished_page_loads, meta.finished_page_url.clone()))
+                });
+                if let Some((_, finished)) = finished.filter(|(loads, _)| *loads > start) {
+                    if Some(finished) == current {
                         break;
                     }
                 }
@@ -184,107 +449,286 @@ mod platform {
     pub async fn open(
         app: &AppHandle,
         url: Option<String>,
-        always_on_top: bool,
+        bounds: Option<BrowserBounds>,
     ) -> Result<BrowserStatus, String> {
-        let browser = if let Some(browser) = app.get_webview_window(LABEL) {
+        let (id, browser) = if let Ok((id, browser)) = webview(app) {
             if let Some(url) = url {
                 let target = validate_url(&url)?;
                 let fragment_only = browser
                     .url()
                     .ok()
                     .is_some_and(|current| fragment_only_navigation(&current, &target));
-                let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
+                let load_start = page_load_count(&id);
                 browser
                     .navigate(target)
                     .map_err(|_| "ページを開けませんでした。".to_string())?;
                 if !fragment_only {
-                    wait_for_page_load(&browser, load_start).await?;
+                    wait_for_page_load(&id, &browser, load_start).await?;
                 }
             }
-            browser
-                .set_always_on_top(always_on_top)
-                .map_err(|_| "最前面設定を変更できませんでした。".to_string())?;
-            browser
-                .show()
-                .map_err(|_| "ブラウザを表示できませんでした。".to_string())?;
+            if let Some(bounds) = bounds {
+                apply_bounds(app, &id, &browser, constrain_bounds(app, Some(bounds))?)?;
+            }
+            if let Ok(mut browsers) = browsers().lock() {
+                if let Some(meta) = browsers.get_mut(&id) {
+                    meta.visible = true;
+                }
+            }
+            if BROWSER_CONTENT_VISIBLE.load(Ordering::Acquire) {
+                browser
+                    .show()
+                    .map_err(|_| "ブラウザを表示できませんでした。".to_string())?;
+            }
+            raise(&browser)?;
             let _ = browser.set_focus();
-            browser
+            (id, browser)
         } else {
             let target = validate_url(url.as_deref().unwrap_or(DEFAULT_URL))?;
-            let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
-            let browser = create_window(app, target, always_on_top, true)?;
-            wait_for_page_load(&browser, load_start).await?;
-            browser
+            let (id, browser) = create_webview(app, target, true, bounds)?;
+            wait_for_page_load(&id, &browser, 0).await?;
+            (id, browser)
         };
-        status_for(Some(browser))
+        set_active(&id);
+        let status = status_for(&id, Some(browser));
+        let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        Ok(status)
+    }
+
+    pub async fn create(app: &AppHandle) -> Result<BrowserStatus, String> {
+        let (id, browser) = create_webview(app, validate_url(DEFAULT_URL)?, true, None)?;
+        wait_for_page_load(&id, &browser, 0).await?;
+        let status = status_for(&id, Some(browser));
+        let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        Ok(status)
     }
 
     pub async fn navigate(app: &AppHandle, url: String) -> Result<BrowserStatus, String> {
-        let browser = window(app)?;
+        let (id, browser) = webview(app)?;
         let target = validate_url(&url)?;
         let fragment_only = browser
             .url()
             .ok()
             .is_some_and(|current| fragment_only_navigation(&current, &target));
-        let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
+        let load_start = page_load_count(&id);
         browser
             .navigate(target)
             .map_err(|_| "ページを開けませんでした。".to_string())?;
         if !fragment_only {
-            wait_for_page_load(&browser, load_start).await?;
+            wait_for_page_load(&id, &browser, load_start).await?;
         }
-        status_for(Some(browser))
+        let status = status_for(&id, Some(browser));
+        let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        Ok(status)
     }
 
-    pub fn close(app: &AppHandle) -> Result<BrowserStatus, String> {
-        if let Some(browser) = app.get_webview_window(LABEL) {
-            browser
-                .close()
-                .map_err(|_| "ブラウザを閉じられませんでした。".to_string())?;
+    pub fn close(app: &AppHandle, requested_id: Option<String>) -> Result<BrowserStatus, String> {
+        let id = requested_id
+            .or_else(active_id)
+            .ok_or_else(|| "ブラウザを先に開いてください。".to_string())?;
+        webview_by_id(app, &id)?
+            .close()
+            .map_err(|_| "ブラウザを閉じられませんでした。".to_string())?;
+        let next_active = if let Ok(mut browsers) = browsers().lock() {
+            browsers.remove(&id);
+            browsers
+                .iter()
+                .max_by_key(|(_, meta)| meta.order)
+                .map(|(id, _)| id.clone())
+        } else {
+            None
+        };
+        if let Ok(mut active) = ACTIVE_BROWSER.lock() {
+            *active = next_active;
         }
-        Ok(BrowserStatus {
+        let status = BrowserStatus {
+            id,
             available: true,
             open: false,
+            visible: false,
             url: None,
-            always_on_top: false,
-        })
+            title: None,
+            bounds: None,
+            opacity: DEFAULT_WEBVIEW_OPACITY,
+        };
+        let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        Ok(status)
     }
 
     pub fn status(app: &AppHandle) -> Result<BrowserStatus, String> {
-        status_for(app.get_webview_window(LABEL))
-    }
-
-    pub fn set_always_on_top(
-        app: &AppHandle,
-        always_on_top: bool,
-    ) -> Result<BrowserStatus, String> {
-        let browser = app.get_webview_window(LABEL);
-        if let Some(browser) = browser.as_ref() {
-            browser
-                .set_always_on_top(always_on_top)
-                .map_err(|_| "最前面設定を変更できませんでした。".to_string())?;
+        if let Some(id) = active_id() {
+            status_by_id(app, &id)
+        } else {
+            Ok(closed_status(String::new()))
         }
-        status_for(browser)
     }
 
-    fn status_for(browser: Option<WebviewWindow>) -> Result<BrowserStatus, String> {
+    pub fn list(app: &AppHandle) -> Vec<BrowserStatus> {
+        let mut entries = browsers()
+            .lock()
+            .ok()
+            .map(|browsers| {
+                browsers
+                    .iter()
+                    .map(|(id, meta)| (meta.order, id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        entries.sort_by_key(|(order, _)| *order);
+        entries
+            .into_iter()
+            .filter_map(|(_, id)| status_by_id(app, &id).ok())
+            .collect()
+    }
+
+    pub fn activate(app: &AppHandle, id: String) -> Result<BrowserStatus, String> {
+        let browser = webview_by_id(app, &id)?;
+        set_active(&id);
+        raise(&browser)?;
+        let _ = browser.set_focus();
+        Ok(status_for(&id, Some(browser)))
+    }
+
+    pub fn set_bounds(
+        app: &AppHandle,
+        id: String,
+        bounds: BrowserBounds,
+    ) -> Result<BrowserStatus, String> {
+        let browser = webview_by_id(app, &id)?;
+        set_active(&id);
+        raise(&browser)?;
+        apply_bounds(app, &id, &browser, constrain_bounds(app, Some(bounds))?)?;
+        let status = status_for(&id, Some(browser));
+        let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        Ok(status)
+    }
+
+    fn apply_visibility(id: &str, browser: &Webview) -> Result<(), String> {
+        let visible = browsers()
+            .lock()
+            .ok()
+            .and_then(|browsers| browsers.get(id).map(|meta| meta.visible))
+            .unwrap_or(false);
+        if visible && BROWSER_CONTENT_VISIBLE.load(Ordering::Acquire) {
+            browser.show()
+        } else {
+            browser.hide()
+        }
+        .map_err(|_| "ブラウザの表示を変更できませんでした。".to_string())
+    }
+
+    pub fn set_visible(
+        app: &AppHandle,
+        id: String,
+        visible: bool,
+    ) -> Result<BrowserStatus, String> {
+        let browser = webview_by_id(app, &id)?;
+        set_active(&id);
+        if visible {
+            raise(&browser)?;
+        }
+        if let Ok(mut browsers) = browsers().lock() {
+            if let Some(meta) = browsers.get_mut(&id) {
+                meta.visible = visible;
+            }
+        }
+        apply_visibility(&id, &browser)?;
+        let status = status_for(&id, Some(browser));
+        let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        Ok(status)
+    }
+
+    pub fn set_opacity(app: &AppHandle, opacity: f64) -> Result<Vec<BrowserStatus>, String> {
+        if !opacity.is_finite() {
+            return Err("透明度が正しくありません。".to_string());
+        }
+        let opacity = opacity.clamp(MIN_WEBVIEW_OPACITY, 1.0);
+        if let Ok(mut configured) = BROWSER_OPACITY.lock() {
+            *configured = opacity;
+        }
+        let ids = browsers()
+            .lock()
+            .ok()
+            .map(|browsers| browsers.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for id in &ids {
+            apply_opacity(&webview_by_id(app, id)?, opacity)?;
+        }
+        if let Ok(mut browsers) = browsers().lock() {
+            for meta in browsers.values_mut() {
+                meta.opacity = opacity;
+            }
+        }
+        let statuses = ids
+            .iter()
+            .filter_map(|id| status_by_id(app, id).ok())
+            .collect::<Vec<_>>();
+        for status in &statuses {
+            let _ = app.emit_to("main", STATUS_EVENT, status.clone());
+        }
+        Ok(statuses)
+    }
+
+    pub fn set_content_visible(app: &AppHandle, visible: bool) -> Result<(), String> {
+        BROWSER_CONTENT_VISIBLE.store(visible, Ordering::Release);
+        let ids = browsers()
+            .lock()
+            .ok()
+            .map(|browsers| browsers.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for id in ids {
+            if let Some(browser) = app.get_webview(&id) {
+                apply_visibility(&id, &browser)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn closed_status(id: String) -> BrowserStatus {
+        BrowserStatus {
+            id,
+            available: true,
+            open: false,
+            visible: false,
+            url: None,
+            title: None,
+            bounds: None,
+            opacity: DEFAULT_WEBVIEW_OPACITY,
+        }
+    }
+
+    fn status_by_id(app: &AppHandle, id: &str) -> Result<BrowserStatus, String> {
+        Ok(status_for(id, Some(webview_by_id(app, id)?)))
+    }
+
+    fn status_for(id: &str, browser: Option<Webview>) -> BrowserStatus {
         let url = browser
             .as_ref()
-            .and_then(|window| window.url().ok())
+            .and_then(|webview| webview.url().ok())
             .map(|url| safe_url_summary(&url));
-        let always_on_top = browser
+        let meta = browsers()
+            .lock()
+            .ok()
+            .and_then(|browsers| browsers.get(id).cloned());
+        let title = meta
             .as_ref()
-            .and_then(|window| window.is_always_on_top().ok())
-            .unwrap_or(false);
-        Ok(BrowserStatus {
+            .and_then(|meta| (!meta.title.is_empty()).then(|| meta.title.clone()));
+        let bounds = meta.as_ref().map(|meta| meta.bounds);
+        let opacity = meta
+            .as_ref()
+            .map_or(DEFAULT_WEBVIEW_OPACITY, |meta| meta.opacity);
+        BrowserStatus {
+            id: id.to_string(),
             available: true,
             open: browser.is_some(),
+            visible: browser.is_some() && meta.is_some_and(|meta| meta.visible),
             url,
-            always_on_top,
-        })
+            title,
+            bounds,
+            opacity,
+        }
     }
 
-    async fn eval(browser: &WebviewWindow, script: String) -> Result<Value, String> {
+    async fn eval(browser: &Webview, script: String) -> Result<Value, String> {
         let (send, receive) = oneshot::channel();
         let send = std::sync::Arc::new(std::sync::Mutex::new(Some(send)));
         browser
@@ -380,11 +824,11 @@ mod platform {
     }
 
     pub async fn snapshot(app: &AppHandle) -> Result<Value, String> {
-        eval(&window(app)?, SNAPSHOT_SCRIPT.into()).await
+        eval(&active_webview(app)?, SNAPSHOT_SCRIPT.into()).await
     }
 
     pub async fn click(app: &AppHandle, reference: String) -> Result<Value, String> {
-        let browser = window(app)?;
+        let (id, browser) = webview(app)?;
         let mut result = eval(
             &browser,
             ref_script(
@@ -409,12 +853,12 @@ mod platform {
                 .url()
                 .ok()
                 .is_some_and(|current| fragment_only_navigation(&current, &target));
-            let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
+            let load_start = page_load_count(&id);
             browser
                 .navigate(target)
                 .map_err(|_| "リンク先を開けませんでした。".to_string())?;
             if !fragment_only {
-                wait_for_page_load(&browser, load_start).await?;
+                wait_for_page_load(&id, &browser, load_start).await?;
             }
             if let Some(object) = result.as_object_mut() {
                 object.remove("href");
@@ -451,7 +895,7 @@ mod platform {
             }}
             el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); state.refs.clear(); return {{ok:true,kind:'type',label:label(el)}};"#
         );
-        let result = eval(&window(app)?, ref_script(reference, &action)).await?;
+        let result = eval(&active_webview(app)?, ref_script(reference, &action)).await?;
         if result.get("ok") != Some(&Value::Bool(true)) {
             return Err("入力対象が変わったか、編集できません。もう一度確認してください。".into());
         }
@@ -461,32 +905,32 @@ mod platform {
     pub async fn scroll(app: &AppHandle, delta_y: f64) -> Result<Value, String> {
         let value = delta_y.clamp(-5000.0, 5000.0);
         eval(
-            &window(app)?,
+            &active_webview(app)?,
             format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} window.scrollBy({{top:{value},behavior:'auto'}}); return {{ok:true,origin:location.origin,scrollY:window.scrollY}}; }})()"),
         )
         .await
     }
 
     pub async fn history(app: &AppHandle, forward: bool) -> Result<Value, String> {
-        let browser = window(app)?;
+        let (id, browser) = webview(app)?;
         let previous_url = browser.url().ok().map(|url| url.to_string());
         let command = if forward {
             "history.forward()"
         } else {
             "history.back()"
         };
-        let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
+        let load_start = page_load_count(&id);
         let result = eval(
             &browser,
             format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} {command}; return {{ok:true}}; }})()"),
         )
         .await?;
-        wait_for_history_navigation(&browser, load_start, previous_url).await?;
+        wait_for_history_navigation(&id, &browser, load_start, previous_url).await?;
         Ok(result)
     }
 
     pub async fn clear_current_storage(app: &AppHandle, domain: &str) -> Result<bool, String> {
-        let browser = window(app)?;
+        let browser = active_webview(app)?;
         let current = browser
             .url()
             .map_err(|_| "現在のページを確認できませんでした。".to_string())?;
@@ -517,23 +961,34 @@ mod platform {
     }
 
     #[allow(dead_code)]
-    fn _runtime_bound<R: Runtime>(_window: &WebviewWindow<R>) {}
+    fn _runtime_bound<R: Runtime>(_window: &Webview<R>) {}
 }
 
 #[tauri::command]
 pub async fn browser_open(
     app: AppHandle,
     url: Option<String>,
-    always_on_top: Option<bool>,
+    bounds: Option<BrowserBounds>,
 ) -> Result<BrowserStatus, String> {
     #[cfg(target_os = "macos")]
     {
-        platform::open(&app, url, always_on_top.unwrap_or(true)).await
+        platform::open(&app, url, bounds).await
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, url, always_on_top);
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        let _ = (app, url, bounds);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_create(app: AppHandle) -> Result<BrowserStatus, String> {
+    #[cfg(target_os = "macos")]
+    return platform::create(&app).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -544,7 +999,7 @@ pub async fn browser_navigate(app: AppHandle, url: String) -> Result<BrowserStat
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, url);
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -556,36 +1011,103 @@ pub async fn browser_status(app: AppHandle) -> Result<BrowserStatus, String> {
     {
         let _ = app;
         Ok(BrowserStatus {
+            id: String::new(),
             available: false,
             open: false,
+            visible: false,
             url: None,
-            always_on_top: false,
+            title: None,
+            bounds: None,
+            opacity: 1.0,
         })
     }
 }
 
 #[tauri::command]
-pub async fn browser_set_always_on_top(
-    app: AppHandle,
-    always_on_top: bool,
-) -> Result<BrowserStatus, String> {
+pub async fn browser_list(app: AppHandle) -> Result<Vec<BrowserStatus>, String> {
     #[cfg(target_os = "macos")]
-    return platform::set_always_on_top(&app, always_on_top);
+    return Ok(platform::list(&app));
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, always_on_top);
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        let _ = app;
+        Ok(Vec::new())
     }
 }
 
 #[tauri::command]
-pub async fn browser_close(app: AppHandle) -> Result<BrowserStatus, String> {
+pub async fn browser_activate(app: AppHandle, id: String) -> Result<BrowserStatus, String> {
     #[cfg(target_os = "macos")]
-    return platform::close(&app);
+    return platform::activate(&app, id);
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        let _ = (app, id);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_set_bounds(
+    app: AppHandle,
+    id: String,
+    bounds: BrowserBounds,
+) -> Result<BrowserStatus, String> {
+    #[cfg(target_os = "macos")]
+    return platform::set_bounds(&app, id, bounds);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, bounds);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_set_visible(
+    app: AppHandle,
+    id: String,
+    visible: bool,
+) -> Result<BrowserStatus, String> {
+    #[cfg(target_os = "macos")]
+    return platform::set_visible(&app, id, visible);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, visible);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_set_opacity(
+    app: AppHandle,
+    opacity: f64,
+) -> Result<Vec<BrowserStatus>, String> {
+    #[cfg(target_os = "macos")]
+    return platform::set_opacity(&app, opacity);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, opacity);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_set_content_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return platform::set_content_visible(&app, visible);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, visible);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_close(app: AppHandle, id: Option<String>) -> Result<BrowserStatus, String> {
+    #[cfg(target_os = "macos")]
+    return platform::close(&app, id);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -596,7 +1118,7 @@ pub async fn browser_snapshot(app: AppHandle) -> Result<Value, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -607,7 +1129,7 @@ pub async fn browser_click(app: AppHandle, reference: String) -> Result<Value, S
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, reference);
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -622,7 +1144,7 @@ pub async fn browser_type(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, reference, text);
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -633,7 +1155,7 @@ pub async fn browser_scroll(app: AppHandle, delta_y: f64) -> Result<Value, Strin
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, delta_y);
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -644,7 +1166,7 @@ pub async fn browser_back(app: AppHandle) -> Result<Value, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
@@ -655,12 +1177,12 @@ pub async fn browser_forward(app: AppHandle) -> Result<Value, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        Err("フローティングブラウザはmacOS版で利用できます。".into())
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::{clear_current_storage, ensure_window};
+pub use platform::{clear_current_storage, ensure_webview};
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {

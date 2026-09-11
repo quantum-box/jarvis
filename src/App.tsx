@@ -21,6 +21,7 @@ import { Settings, loadSettings } from "./components/Settings";
 import { UpdateController } from "./lib/updater";
 import { AppUpdate } from "./components/AppUpdate";
 import { StartupUpdatePrompt, startupUpdateVersion as getStartupUpdateVersion } from "./components/StartupUpdatePrompt";
+import { VirtualBrowser } from './components/VirtualBrowser';
 import { listenForUpdateCheck } from "./lib/app-menu";
 import { Login } from './components/Login';
 import { AuthSession } from './lib/auth';
@@ -40,7 +41,7 @@ import {
   browserRequest,
   browserSessionConfig,
   isManagedBrowserAvailable,
-  loadBrowserAlwaysOnTop,
+  loadBrowserOpacity,
   type BrowserApprovalRequest,
 } from "./lib/browser";
 
@@ -86,6 +87,17 @@ export default function App() {
   const busy = state === "connecting";
   const conversationActive = connected || busy;
   const textInputSupported = normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL;
+  const startupPromptVisible = Boolean(
+    startupUpdateVersion &&
+    updateState.phase === 'available' &&
+    updateState.version === startupUpdateVersion &&
+    dismissedUpdateVersion !== startupUpdateVersion,
+  );
+  useEffect(() => {
+    if (!browserAvailable) return;
+    void browserRequest('set_opacity', { opacity: loadBrowserOpacity() })
+      .catch(e => setError(e instanceof Error ? e.message : String(e)));
+  }, [browserAvailable]);
   useEffect(() => {
     let removeListener: (() => void) | undefined;
     let disposed = false;
@@ -293,7 +305,7 @@ export default function App() {
   }
   async function openBrowser() {
     try {
-      await browserRequest('open', { alwaysOnTop: loadBrowserAlwaysOnTop() });
+      await browserRequest('create');
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -336,7 +348,7 @@ export default function App() {
           <div className="brand-name">JARVIS</div>
         </div>
         <div className="top-right">
-          {browserAvailable && <button className="icon-button" aria-label="フローティングブラウザを開く" title="フローティングブラウザ" onClick={() => void openBrowser()}><Globe2 size={18}/></button>}
+          {browserAvailable && <button className="icon-button" aria-label="アプリ内ブラウザを開く" title="アプリ内ブラウザ" onClick={() => void openBrowser()}><Globe2 size={18}/></button>}
           <button ref={conversationToggle} className="icon-button" aria-label={showConversation ? '会話を閉じる' : '会話を開く'} aria-expanded={showConversation} aria-controls="conversation-panel" onClick={() => setShowConversation(v => !v)}><MessageSquare size={18}/></button>
           <button className="account-button" aria-label={identity ? `${identity.user.username}からログアウト` : "Tachyonにログイン"} title={identity ? "ログアウト" : "Tachyonにログイン"} onClick={() => { if (identity) void logout().catch(e => setError(e instanceof Error ? e.message : String(e))); else openLogin(); }} disabled={busy || restoring}>{identity ? <LogOut size={15}/> : <LogIn size={15}/>}<span>{identity ? identity.user.username : restoring ? 'ログイン状態を復元中' : 'Tachyonにログイン'}</span></button>
           <time>
@@ -521,6 +533,12 @@ export default function App() {
           </form>
         </aside>
       </div>
+      {browserAvailable && (
+        <VirtualBrowser
+          obscured={showSettings || Boolean(browserApproval) || Boolean(loginSession) || startupPromptVisible}
+          onError={setError}
+        />
+      )}
       {showSettings && !restoring && (
         <Settings
           appUpdate={<AppUpdate controller={updater} conversationActive={conversationActive} />}
@@ -531,10 +549,7 @@ export default function App() {
           tenants={identity?.tenants}
         />
       )}
-      {startupUpdateVersion &&
-        updateState.phase === 'available' &&
-        updateState.version === startupUpdateVersion &&
-        dismissedUpdateVersion !== startupUpdateVersion && (
+      {startupPromptVisible && startupUpdateVersion && (
           <StartupUpdatePrompt
             currentVersion={updateState.currentVersion}
             version={startupUpdateVersion}
