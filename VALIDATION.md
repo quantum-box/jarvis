@@ -1,5 +1,16 @@
 # Validation
 
+## GPT Live 1 through Tachyon (PLT-4531)
+
+- Updated the default voice model to `gpt-live-1` with Responses delegation to `gpt-5.6-terra`. Explicit legacy Realtime models keep using the existing call endpoint.
+- Ran the JARVIS `Realtime` browser adapter against a local Tachyon API backed by the real OpenAI provider. The Live session returned HTTP 201, then emitted `data_channel.open` and `session.started`; WebRTC and ICE both reached `connected` with no client error.
+- Confirmed the matching Tachyon audit event stores `model=gpt-live-1` and `delegation=responses`. No credential or SDP was recorded in this document.
+- Verified the settings UI shows the new Live and backend defaults. Live waits for `session.started`, consumes timestamped input/output transcript deltas, sends Live mute/unmute commands, and attempts graceful `session.close`. Because GPT Live has no general running-session text-message equivalent to Realtime's conversation item event, the composer is disabled in Live mode instead of silently producing a backend-only answer.
+- `npm test`: 74 tests passed. `npm run typecheck`, `npm run build`, `cargo +stable fmt --check`, clippy with warnings denied, Rust tests, and updater-enabled `cargo check` passed. The Keychain test remains intentionally ignored because it writes to the real macOS Keychain.
+- Not verified: real microphone speech recognition, audible remote playback, native Tauri UI login, signed application packaging, CI, deployment, or release publication.
+
+2026-09-11 / macOS
+
 ## GPT Realtime 2.1 (PLT-4245)
 
 - Updated the shared UI/transport default to `gpt-realtime-2.1`, matching merged Tachyon PR #9325. Older saved default aliases upgrade on load; other models and explicit choices saved with the new settings version survive reload.

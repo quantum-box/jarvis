@@ -1,9 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { defaults, loadSettings, saveSettings } from "./Settings";
 afterEach(() => vi.unstubAllGlobals());
-it.each([undefined, "", "gpt-realtime", "gpt-realtime-2"])("upgrades the saved default %s to 2.1", (model) => {
+it.each([undefined, "", "gpt-realtime", "gpt-realtime-2", "gpt-realtime-2.1"])("upgrades the saved default %s to GPT Live", (model) => {
   vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ model, voice: "cedar", tenantId: "tn_test" }) });
-  expect(loadSettings()).toMatchObject({ model: "gpt-realtime-2.1", voice: "cedar", tenantId: "tn_test" });
+  expect(loadSettings()).toMatchObject({ model: "gpt-live-1", backendModel: "gpt-5.6-terra", voice: "cedar", tenantId: "tn_test" });
 });
 it("preserves other saved models", () => {
   vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ model: "gpt-realtime-translate" }) });
