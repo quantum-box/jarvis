@@ -15,11 +15,12 @@ JARVISの音声対話からWeb上の情報を探し、ページを読み、ユ�
 ## Decision
 
 - macOS版に、JARVISがライフサイクルを管理する単一のフローティングブラウザを追加する。Tauriの`WebviewWindow`で外部URLを表示し、JARVIS本体の近くに配置して最前面表示を選べるようにする。ブラウザを閉じてもWebデータはJARVIS専用の永続プロファイルに保持する。
-- 外部ページを読み込むWebViewにはTauri IPCとローカルcapabilityを付与しない。ページからJARVISのコマンドを呼び出す経路は作らず、JARVIS本体からRustが保持するブラウザハンドルを操作する。
+- 外部ページを読み込むWebViewにはTauri IPCとローカルcapabilityを付与しない。ページからJARVISのコマンドを呼び出す経路は作らず、JARVIS本体からRustが保持するブラウザハンドルを操作する。DOM操作の結果は、ホストが開始したTauri 2.11.5の`eval_with_callback`だけでRustへ返す。ページ側が任意のメッセージを送れるhandlerや公開callbackは追加しない。
 - ナビゲーションは`https`を既定とし、`file`、`data`、`javascript`、Tauriのカスタムschemeを拒否する。開発時の明示操作に限りlocalhostの`http`を許可する。新規ウィンドウ、ダウンロード、ファイル選択は個別のユーザー操作として扱う。
-- 音声AIへ`browser_open`、`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_scroll`、`browser_back`、`browser_forward`、`browser_close`をローカルfunction toolsとして提供する。座標ではなく、`browser_snapshot`が返す短命な参照IDで要素を指定する。参照IDはページ遷移または次のsnapshotで失効する。
-- snapshotは表示中の本文と操作可能な要素を件数・深さ・文字数で制限して返す。password入力値、Cookie、Web Storage、認証header、非表示要素、script内容は返さない。ページ内の文章とツール結果は参照データとして扱い、操作指示として扱わない。
-- `browser_type`は入力だけを行い送信しない。送信、購入、削除、権限変更など結果を確定する操作は、ユーザーが現在の依頼で明示した場合だけ実行する。入力または確定操作の結果が不明な場合は自動再試行せず、同じページを再度snapshotして結果を確認する。
+- 音声AIへ`browser_open`、`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_scroll`、`browser_back`、`browser_forward`、`browser_close`をローカルfunction toolsとして提供する。座標ではなく、`browser_snapshot`が返す短命な参照IDで要素を指定する。参照IDはURL、origin、DOM revision、要素のrole・label・type・hrefを含むfingerprintへ結び付ける。`MutationObserver`による関連DOM変更、ページ遷移、次のsnapshot、または実行時fingerprint不一致で失効させる。
+- snapshotは表示中の本文と操作可能な要素を件数・深さ・文字数で制限して返す。フォームcontrolと`contenteditable`の現在値はtypeに関係なく既定ですべて返さない。Cookie、Web Storage、認証header、非表示要素、script内容も返さない。ユーザーが現在の操作で特定controlの値の読取りを明示した場合だけ、そのcontrolと一回のsnapshotに限定したローカル許可を発行する。
+- ページ内の文章とツール結果は信頼しない。ローカルexecutorは、モデルとは別にorigin、参照fingerprint、操作種別、現在のユーザー発話から一回限りの許可を判定する。snapshot内のリンクをたどる同一originの読取り操作は継続できるが、任意文字列を含むURLへの遷移、cross-origin遷移、フォーム入力、確定操作は、現在のユーザー発話に対象と値が明示されているか、JARVISの確認UIで許可された場合だけ実行する。ページ、モデル、tool引数自身は許可を発行できない。
+- `browser_type`は自動保存や自動送信を起こし得る変更操作として扱い、上記のデータ送信許可を必須にする。送信、購入、削除、権限変更など結果を確定するclickは、ユーザーが現在の依頼で明示した場合だけ実行する。入力または確定操作の結果が不明な場合は自動再試行せず、新しいsnapshotで結果を確認する。
 - ChromeからのCookieインポートは、ユーザーが設定画面から開始する一回限りのローカル操作とする。Chromeプロファイルと対象ドメインを選択し、ChromeのCookie DBを読み取り専用の一時コピーから解析する。必要な復号鍵はmacOS Keychainへ明示的にアクセスし、復号したCookieはJARVISのWebView cookie storeへ直接設定する。
 - Cookieの値、復号鍵、Chrome DBのコピーを永続ログ、Frontend state、AIモデル、Tachyonへ送らない。UIにはプロファイル名、ドメイン、件数、有効期限、成功・再ログイン必要の結果だけを表示する。自動同期は行わず、再インポートもユーザーが開始する。
 - Cookieの削除とサイト単位のWebデータ削除をJARVISの設定から実行できるようにする。パスワード、履歴、ブックマーク、拡張機能、決済情報はインポート対象外とする。
