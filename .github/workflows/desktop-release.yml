@@ -77,14 +77,56 @@ jobs:
           restore-keys: desktop-release-${{ runner.arch }}-
       - run: npm ci
       - run: npm test
-      - name: Build signed updater archive and manifest
+      - name: Import Developer ID certificate and notarization key
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE:?APPLE_CERTIFICATE is required}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD is required}"
+          : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required}"
+          : "${APPLE_API_PRIVATE_KEY:?APPLE_API_PRIVATE_KEY is required}"
+          certificate_path="$RUNNER_TEMP/jarvis-signing.p12"
+          keychain_path="$RUNNER_TEMP/jarvis-signing.keychain-db"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          keychain_password="$(openssl rand -base64 32)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          {
+            echo "JARVIS_RELEASE_KEYCHAIN=$keychain_path"
+            echo "APPLE_API_KEY_PATH=$api_key_path"
+          } >> "$GITHUB_ENV"
+      - name: Build Developer ID signed, notarized updater archive and manifest
         run: npm run release:desktop -- ${{ matrix.target }}
         env:
           RUSTUP_TOOLCHAIN: stable
           JARVIS_UPDATE_BASE_URL: ${{ vars.JARVIS_UPDATE_BASE_URL }}
           JARVIS_UPDATER_PUBLIC_KEY: ${{ vars.JARVIS_UPDATER_PUBLIC_KEY }}
+          JARVIS_APPLE_SIGNING_IDENTITY: ${{ vars.JARVIS_APPLE_SIGNING_IDENTITY }}
+          JARVIS_APPLE_TEAM_ID: ${{ vars.JARVIS_APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${JARVIS_RELEASE_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$JARVIS_RELEASE_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/jarvis-signing.p12" "$RUNNER_TEMP"/AuthKey_*.p8
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: JARVIS-update-${{ matrix.target }}

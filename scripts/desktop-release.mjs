@@ -1,7 +1,10 @@
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
 
 // One architecture per invocation. GitHub Releases use flat assets and a combined manifest.
 const target = process.argv[2];
@@ -15,6 +18,13 @@ if (base.protocol !== 'https:' || base.username || base.password || base.search 
 base.pathname = base.pathname.replace(/\/?$/, '/');
 const pubkey = process.env.JARVIS_UPDATER_PUBLIC_KEY?.trim();
 if (!pubkey || !process.env.TAURI_SIGNING_PRIVATE_KEY) throw new Error('Updater public key and signing private key are required');
+const appleIdentity = process.env.JARVIS_APPLE_SIGNING_IDENTITY?.trim();
+const appleTeamId = process.env.JARVIS_APPLE_TEAM_ID?.trim();
+if (!appleIdentity || !appleTeamId) throw new Error('Apple signing identity and team ID are required');
+if (!process.env.APPLE_API_KEY || !process.env.APPLE_API_ISSUER || !process.env.APPLE_API_KEY_PATH) {
+  throw new Error('App Store Connect API key ID, issuer, and private key path are required');
+}
+if (!existsSync(process.env.APPLE_API_KEY_PATH)) throw new Error('App Store Connect private key file does not exist');
 // Reject accidentally passing a private key or path as the public key.
 const publicLines = Buffer.from(pubkey, 'base64').toString('utf8').trim().split('\n');
 if (!publicLines[0]?.startsWith('untrusted comment:') || Buffer.from(publicLines[1] || '', 'base64').length !== 42) {
@@ -38,9 +48,20 @@ const temp = mkdtempSync(join(tmpdir(), 'jarvis-release-'));
 try {
   const configPath = join(temp, 'updater.json');
   writeFileSync(configPath, JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey, endpoints: [endpoint] } } }));
-  const build = spawnSync('npm', ['run', 'tauri', 'build', '--', '--ci', '--target', target, '--bundles', 'app', '--config', configPath, '--', '--locked'], { stdio: 'inherit' });
+  const build = spawnSync('npm', ['run', 'tauri', 'build', '--', '--ci', '--target', target, '--bundles', 'app', '--config', configPath, '--', '--locked'], {
+    stdio: 'inherit',
+    env: { ...process.env, APPLE_SIGNING_IDENTITY: appleIdentity },
+  });
   if (build.status !== 0) throw new Error(`Tauri build failed (${build.status})`);
   const bundle = resolve(`src-tauri/target/${target}/release/bundle/macos/JARVIS.app.tar.gz`);
+  const extracted = join(temp, 'archive');
+  mkdirSync(extracted);
+  const unpack = spawnSync('tar', ['-xzf', bundle, '-C', extracted], { stdio: 'inherit' });
+  if (unpack.status !== 0) throw new Error(`Updater archive extraction failed (${unpack.status})`);
+  const archivedApp = join(extracted, 'JARVIS.app');
+  if (!existsSync(archivedApp)) throw new Error('Updater archive does not contain JARVIS.app');
+  const verify = spawnSync(process.execPath, [join(scriptDir, 'verify-macos-release.mjs'), archivedApp, config.identifier, appleIdentity, appleTeamId], { stdio: 'inherit' });
+  if (verify.status !== 0) throw new Error(`Notarized app verification failed (${verify.status})`);
   const output = resolve(`artifacts/updates/${platform}`);
   const archiveDir = githubReleases ? output : join(output, pkg.version);
   const outputArchiveName = githubReleases ? archiveName : 'JARVIS.app.tar.gz';
