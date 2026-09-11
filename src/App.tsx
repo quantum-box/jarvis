@@ -36,6 +36,7 @@ import {
 } from "./lib/realtime";
 import {
   BrowserToolRunner,
+  browserBackendConfig,
   browserRequest,
   browserSessionConfig,
   isManagedBrowserAvailable,
@@ -216,10 +217,10 @@ export default function App() {
       onError: (value) => { if (client.current === next) setError(value); },
       onEvent: (event) => {
         if (client.current !== next) return;
-        if (event.type === 'data_channel.open' && browserAvailable) {
+        if (event.type === 'data_channel.open' && browserAvailable && normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL) {
           next.sendEvent(browserSessionConfig(settings.instructions));
         }
-        if (event.type === 'input_audio_buffer.speech_started') {
+        if (event.type === 'input_audio_buffer.speech_started' || event.type === 'session.input_transcript.delta') {
           resolveBrowserApproval(false);
         }
         browserTools.current?.handle(event);
@@ -246,7 +247,13 @@ export default function App() {
       const chatroomId = settings.chatroomId.trim() || await createChatroom(settings.baseUrl, settings.tenantId, transport.fetch);
       if (attempt !== connectionAttempt.current || authRef.current !== auth) return;
       setSettings(previous => ({...previous, chatroomId}));
-      await next.connect({...settings, chatroomId, token}, transport);
+      await next.connect(
+        {...settings, chatroomId, token},
+        transport,
+        browserAvailable && normalizeRealtimeModel(settings.model) === DEFAULT_REALTIME_MODEL
+          ? browserBackendConfig(settings.instructions)
+          : {},
+      );
     } catch (e) {
       if (client.current !== next || connectionAttempt.current !== attempt) return;
       setState('error');

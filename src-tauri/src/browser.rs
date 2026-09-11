@@ -330,7 +330,7 @@ mod platform {
         let value = delta_y.clamp(-5000.0, 5000.0);
         eval(
             &window(app)?,
-            format!("(() => {{ window.scrollBy({{top:{value},behavior:'smooth'}}); return {{ok:true,url:location.href,scrollY:window.scrollY}}; }})()"),
+            format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} window.scrollBy({{top:{value},behavior:'auto'}}); return {{ok:true,origin:location.origin,scrollY:window.scrollY}}; }})()"),
         )
         .await
     }
@@ -343,7 +343,7 @@ mod platform {
         };
         eval(
             &window(app)?,
-            format!("(() => {{ {command}; return {{ok:true}}; }})()"),
+            format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} {command}; return {{ok:true}}; }})()"),
         )
         .await
     }

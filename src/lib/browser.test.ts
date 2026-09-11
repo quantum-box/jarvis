@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
 	BrowserToolRunner,
+	browserBackendConfig,
 	isMacDesktopEnvironment,
 	type BrowserSnapshot,
 	type browserRequest,
@@ -34,6 +35,23 @@ const done = (name: string, args: Record<string, unknown>, id: string): Realtime
 	},
 })
 
+const liveDone = (name: string, args: Record<string, unknown>, id: string): RealtimeEvent[] => [
+	{
+		type: 'response.event',
+		delegation_id: 'delegation-live',
+		event: {
+			type: 'response.output_item.done',
+			response_id: 'response-live',
+			item: { type: 'function_call', name, call_id: id, arguments: JSON.stringify(args) },
+		},
+	},
+	{
+		type: 'response.event',
+		delegation_id: 'delegation-live',
+		event: { type: 'response.completed', response: { id: 'response-live' } },
+	},
+]
+
 function fixture(approve = vi.fn(async () => false)) {
 	const events: RealtimeEvent[] = []
 	const operations: Array<{ operation: string; args: Record<string, unknown> }> = []
@@ -47,6 +65,30 @@ function fixture(approve = vi.fn(async () => false)) {
 }
 
 describe('BrowserToolRunner', () => {
+	it('runs GPT Live nested Responses calls and returns a Responses tool result', async () => {
+		const f = fixture()
+		for (const event of liveDone('browser_snapshot', {}, 'live-snapshot')) {
+			f.runner.handle(event)
+		}
+		await f.runner.settled()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+		expect(f.events).toMatchObject([
+			{ type: 'response.item.create', item: { type: 'function_call_output', call_id: 'live-snapshot' } },
+			{ type: 'response.create' },
+		])
+	})
+
+	it('waits for the Live response terminal event before executing tools', async () => {
+		const f = fixture()
+		const [item, completed] = liveDone('browser_snapshot', {}, 'live-wait')
+		f.runner.handle(item)
+		await f.runner.settled()
+		expect(f.operations).toEqual([])
+		f.runner.handle(completed)
+		await f.runner.settled()
+		expect(f.operations.map(entry => entry.operation)).toEqual(['snapshot'])
+	})
+
 	it('follows a same-origin snapshot link without dispatching a new approval', async () => {
 		const f = fixture()
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot'))
@@ -152,6 +194,31 @@ describe('BrowserToolRunner', () => {
 		await f.runner.settled()
 		expect(approve).toHaveBeenCalledOnce()
 		expect(f.operations).toEqual([])
+	})
+
+	it('requires a fresh snapshot after scrolling', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-scroll'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_scroll', { delta_y: 500 }, 'scroll'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_click', { reference: 'e3-1' }, 'stale-after-scroll'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'scroll'])
+	})
+})
+
+describe('browserBackendConfig', () => {
+	it('adds browser tools to the managed Responses delegation configuration', () => {
+		const config = browserBackendConfig('You are JARVIS.')
+		expect(config.backend).toMatchObject({
+			instructions: expect.stringContaining('You are JARVIS.'),
+			toolChoice: 'auto',
+			parallelToolCalls: false,
+		})
+		expect(config.backend?.tools?.map(tool => tool.name)).toContain('browser_snapshot')
 	})
 })
 

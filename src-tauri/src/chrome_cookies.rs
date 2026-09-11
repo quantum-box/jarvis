@@ -222,9 +222,15 @@ mod platform {
             return Err(());
         }
         let mut buffer = encrypted[3..].to_vec();
-        let plaintext = Aes128CbcDec::new(key.into(), (&[b' '; 16]).into())
+        let plaintext = match Aes128CbcDec::new(key.into(), (&[b' '; 16]).into())
             .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-            .map_err(|_| ())?;
+        {
+            Ok(plaintext) => plaintext,
+            Err(_) => {
+                buffer.zeroize();
+                return Err(());
+            }
+        };
         let plaintext = if version >= 24 {
             if plaintext.len() < 32 || plaintext[..32] != Sha256::digest(host.as_bytes())[..] {
                 buffer.zeroize();
