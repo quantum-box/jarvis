@@ -247,6 +247,10 @@ const utteranceHasNegation = (utterance: string) => negationWords.test(utterance
 const typingWords =
 	/(入力して|入力する|記入して|記入する|タイプして|タイプする|書き込んで|書き込む|貼り付けて|貼り付ける|ペーストして|ペーストする|打ち込んで|打ち込む|書いて|入れて|\b(?:type|enter|fill|write|paste)\b)/i
 
+const explicitlyTypesIntoField = (utterance: string, label: string, value: string) =>
+	utterance.split(/[。！？!?；;,，、\n]+/).some(clause =>
+		typingWords.test(clause) && utteranceContains(clause, label) && utteranceContains(clause, value))
+
 const explicitlyClosesBrowser = (utterance: string) =>
 	!utteranceHasNegation(utterance) &&
 	/(?:ブラウザ|ページ|サイト|タブ|ウィンドウ)(?:を|も)?(?:閉じて|終了して)|\bclose\s+(?:the\s+)?(?:browser|page|site|tab|window)\b/i.test(utterance)
@@ -289,6 +293,9 @@ export class BrowserToolRunner {
 	private utterance = ''
 	private snapshot: BrowserSnapshot | null = null
 	private liveCalls = new Map<string, FunctionCall[]>()
+	private responseGenerations = new Map<string, number>()
+	private suspended = false
+	private requiresFreshSnapshot = false
 
 	constructor(
 		private client: Pick<RealtimeClient, 'sendEvent'>,
@@ -312,6 +319,14 @@ export class BrowserToolRunner {
 		this.liveCalls.clear()
 	}
 
+	setSuspended(value: boolean) {
+		if (value === this.suspended) return
+		this.suspended = value
+		this.interrupt()
+		this.snapshot = null
+		this.requiresFreshSnapshot = true
+	}
+
 	handle(event: RealtimeEvent) {
 		if (event.type === 'input_audio_buffer.speech_started' || event.type === 'session.input_transcript.delta') {
 			this.utterance = ''
@@ -322,6 +337,13 @@ export class BrowserToolRunner {
 			this.handleLiveResponseEvent(event)
 			return
 		}
+		if (event.type === 'response.created') {
+			const response = event.response && typeof event.response === 'object' && !Array.isArray(event.response)
+				? event.response as Record<string, unknown> : undefined
+			const responseId = response && typeof response.id === 'string' ? response.id : undefined
+			if (responseId) this.responseGenerations.set(responseId, this.generation)
+			return
+		}
 		if (
 			event.type !== 'response.done' ||
 			!event.response ||
@@ -329,13 +351,18 @@ export class BrowserToolRunner {
 		)
 			return
 		const response = event.response as {
+			id?: string
 			status?: string
 			output?: FunctionCall[]
 		}
 		if (response.status && response.status !== 'completed') return
+		if (!response.id) return
+		const generation = this.responseGenerations.get(response.id) ?? (this.generation === 0 ? 0 : undefined)
+		this.responseGenerations.delete(response.id)
+		if (generation === undefined || generation !== this.generation || this.suspended) return
 		const calls =
 			response.output?.filter(item => item.type === 'function_call') ?? []
-		this.enqueue(calls, 'realtime')
+		this.enqueue(calls, 'realtime', generation)
 	}
 
 	private handleLiveResponseEvent(event: RealtimeEvent) {
@@ -343,6 +370,13 @@ export class BrowserToolRunner {
 		const nested = event.event as Record<string, unknown>
 		const nestedType = typeof nested.type === 'string' ? nested.type : ''
 		const delegationId = typeof event.delegation_id === 'string' ? event.delegation_id : undefined
+		if (nestedType === 'response.created') {
+			const response = nested.response && typeof nested.response === 'object' && !Array.isArray(nested.response)
+				? nested.response as Record<string, unknown> : undefined
+			const responseId = response && typeof response.id === 'string' ? response.id : delegationId
+			if (responseId) this.responseGenerations.set(responseId, this.generation)
+			return
+		}
 		if (nestedType === 'response.output_item.done') {
 			if (!nested.item || typeof nested.item !== 'object' || Array.isArray(nested.item)) return
 			const item = nested.item as FunctionCall
@@ -365,12 +399,14 @@ export class BrowserToolRunner {
 		if (!responseId) return
 		const calls = this.liveCalls.get(responseId) ?? []
 		this.liveCalls.delete(responseId)
-		this.enqueue(calls, 'live')
+		const generation = this.responseGenerations.get(responseId) ?? (this.generation === 0 ? 0 : undefined)
+		this.responseGenerations.delete(responseId)
+		if (generation === undefined || generation !== this.generation || this.suspended) return
+		this.enqueue(calls, 'live', generation)
 	}
 
-	private enqueue(calls: FunctionCall[], protocol: ToolProtocol) {
+	private enqueue(calls: FunctionCall[], protocol: ToolProtocol, generation: number) {
 		if (!calls.length) return
-		const generation = this.generation
 		this.queue = this.queue
 			.then(async () => {
 				let executed = false
@@ -406,6 +442,10 @@ export class BrowserToolRunner {
 			}
 			const args = asRecord(JSON.parse(call.arguments ?? '{}'))
 			const operation = call.name!.slice('browser_'.length)
+			if (this.suspended) throw new Error('ローカル画面を閉じてから、もう一度ページを確認してください。')
+			if (this.requiresFreshSnapshot && operation !== 'snapshot') {
+				throw new Error('もう一度ページを確認してから操作してください。')
+			}
 			if (!(await this.authorized(operation, args, generation))) {
 				return { error: 'ユーザーがこのブラウザ操作を許可しませんでした。', retryAutomatically: false }
 			}
@@ -423,6 +463,7 @@ export class BrowserToolRunner {
 					break
 				case 'snapshot':
 					this.snapshot = await this.request<BrowserSnapshot>('snapshot')
+					this.requiresFreshSnapshot = false
 					output = this.snapshot
 					break
 				case 'click': {
@@ -510,9 +551,7 @@ export class BrowserToolRunner {
 			explicit = Boolean(
 				element?.label &&
 					!utteranceHasNegation(this.utterance) &&
-					typingWords.test(this.utterance) &&
-					utteranceContains(this.utterance, element.label) &&
-					utteranceContains(this.utterance, value),
+					explicitlyTypesIntoField(this.utterance, element.label, value),
 			)
 			description = `${element?.label || 'フォーム'}へ文字を入力します。入力により自動保存・送信される可能性があります。`
 			detail = value

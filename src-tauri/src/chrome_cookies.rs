@@ -359,11 +359,18 @@ mod platform {
         transaction
             .rollback()
             .map_err(|_| "ChromeのCookieデータの読み取りを終了できませんでした。".to_string())?;
-        let browser = crate::browser::ensure_webview(app, false)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let needs_key = rows.iter().any(|row| {
+            let expiry = row.expires / 1_000_000 - CHROME_EPOCH_OFFSET_SECONDS;
+            row.partition_key.is_empty()
+                && (!row.has_expires || expiry > now)
+                && row.value.is_empty()
+        });
+        let mut key = if needs_key { Some(chrome_key()?) } else { None };
+        let browser = crate::browser::ensure_webview(app, false)?;
         let mut result = CookieImportResult {
             domain,
             imported: 0,
@@ -372,7 +379,6 @@ mod platform {
             failed: 0,
             latest_expiry_unix: None,
         };
-        let mut key: Option<[u8; 16]> = None;
         for mut row in rows {
             if !row.partition_key.is_empty() {
                 result.unsupported += 1;
@@ -386,9 +392,6 @@ mod platform {
             let mut value = if !row.value.is_empty() {
                 std::mem::take(&mut row.value)
             } else {
-                if key.is_none() {
-                    key = Some(chrome_key()?);
-                }
                 match decrypt_value(&row.host, &row.encrypted, key.as_ref().unwrap(), version) {
                     Ok(value) => value,
                     Err(()) => {

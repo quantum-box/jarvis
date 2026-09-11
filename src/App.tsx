@@ -93,6 +93,11 @@ export default function App() {
     updateState.version === startupUpdateVersion &&
     dismissedUpdateVersion !== startupUpdateVersion,
   );
+  const browserExecutionObscured = showSettings || Boolean(loginSession) || startupPromptVisible;
+  const browserObscured = browserExecutionObscured || Boolean(browserApproval);
+  useEffect(() => {
+    browserTools.current?.setSuspended(browserExecutionObscured);
+  }, [browserExecutionObscured]);
   useEffect(() => {
     if (!browserAvailable) return;
     void browserRequest('set_opacity', { opacity: loadBrowserOpacity() })
@@ -260,6 +265,7 @@ export default function App() {
     browserTools.current = browserAvailable
       ? new BrowserToolRunner(next, browserRequest, requestBrowserApproval, setError)
       : null;
+    browserTools.current?.setSuspended(browserExecutionObscured);
     try {
       const token = await auth.getAccessToken();
       if (attempt !== connectionAttempt.current || authRef.current !== auth) return;
@@ -544,7 +550,7 @@ export default function App() {
       </div>
       {browserAvailable && (
         <VirtualBrowser
-          obscured={showSettings || Boolean(browserApproval) || Boolean(loginSession) || startupPromptVisible}
+          obscured={browserObscured}
           onError={setError}
         />
       )}

@@ -31,12 +31,14 @@ const snapshot: BrowserSnapshot = {
 const done = (name: string, args: Record<string, unknown>, id: string): RealtimeEvent => ({
 	type: 'response.done',
 	response: {
+		id: `response-${id}`,
 		status: 'completed',
 		output: [{ type: 'function_call', name, call_id: id, arguments: JSON.stringify(args) }],
 	},
 })
 
 const liveDone = (name: string, args: Record<string, unknown>, id: string): RealtimeEvent[] => [
+	{ type: 'response.event', delegation_id: 'delegation-live', event: { type: 'response.created', response: { id: 'response-live' } } },
 	{
 		type: 'response.event',
 		delegation_id: 'delegation-live',
@@ -84,7 +86,8 @@ describe('BrowserToolRunner', () => {
 
 	it('waits for the Live response terminal event before executing tools', async () => {
 		const f = fixture()
-		const [item, completed] = liveDone('browser_snapshot', {}, 'live-wait')
+		const [created, item, completed] = liveDone('browser_snapshot', {}, 'live-wait')
+		f.runner.handle(created)
 		f.runner.handle(item)
 		await f.runner.settled()
 		expect(f.operations).toEqual([])
@@ -236,6 +239,18 @@ describe('BrowserToolRunner', () => {
 		expect(f.approve).not.toHaveBeenCalled()
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'type', 'snapshot'])
 		expect(f.events.at(-1)).toMatchObject({ type: 'response.create' })
+	})
+
+	it('binds typing intent to the field and value in the same clause', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-separated-type'))
+		await f.runner.settled()
+		f.runner.setUserUtterance('検索結果は東京です。メモに大阪と入力して')
+		f.runner.handle(done('browser_type', { reference: 'e3-3', text: '大阪' }, 'separated-type'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
 	it('does not authorize a model-invented query URL from a hostname mention', async () => {
@@ -486,11 +501,22 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
+	it('discards a terminal response that started before an interruption', async () => {
+		const f = fixture()
+		f.runner.handle({ type: 'response.created', response: { id: 'response-stale' } })
+		f.runner.handle({ type: 'input_audio_buffer.speech_started' })
+		f.runner.setUserUtterance('新しい依頼')
+		f.runner.handle({ type: 'response.done', response: { id: 'response-stale', status: 'completed', output: [{ type: 'function_call', name: 'browser_snapshot', call_id: 'stale', arguments: '{}' }] } })
+		await f.runner.settled()
+		expect(f.operations).toEqual([])
+	})
+
 	it('clears the previous utterance when the user starts speaking', async () => {
 		const approve = vi.fn(async () => false)
 		const f = fixture(approve)
 		f.runner.setUserUtterance('example.comを開いて')
 		f.runner.handle({ type: 'input_audio_buffer.speech_started' })
+		f.runner.handle({ type: 'response.created', response: { id: 'response-new-speech-nav' } })
 		f.runner.handle(
 			done('browser_navigate', { url: 'https://example.com/' }, 'new-speech-nav'),
 		)

@@ -1051,7 +1051,7 @@ mod platform {
         }
         return true;
       };
-      const intersectsVisibleClips = (rect, el) => {
+      const clippedBounds = (rect, el) => {
         let left = 0, top = 0, right = innerWidth, bottom = innerHeight;
         for (let current = el; current; current = current.parentElement) {
           const style = getComputedStyle(current);
@@ -1063,16 +1063,28 @@ mod platform {
             if (clipsY) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
           }
         }
-        return rect.width > 0 && rect.height > 0 && rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom;
+        left = Math.max(left, rect.left); top = Math.max(top, rect.top);
+        right = Math.min(right, rect.right); bottom = Math.min(bottom, rect.bottom);
+        return rect.width > 0 && rect.height > 0 && right > left && bottom > top ? {left, top, right, bottom} : null;
+      };
+      const reachesTopLayer = (rect, el) => {
+        const bounds = clippedBounds(rect, el); if (!bounds) return false;
+        const insetX = Math.min(2, (bounds.right - bounds.left) / 4);
+        const insetY = Math.min(2, (bounds.bottom - bounds.top) / 4);
+        const points = [[(bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2], [bounds.left + insetX, bounds.top + insetY], [bounds.right - insetX, bounds.bottom - insetY]];
+        return points.some(([x, y]) => {
+          const top = document.elementFromPoint(x, y);
+          return Boolean(top && (top === el || el.contains(top)));
+        });
       };
       const visible = el => {
         const rect = el.getBoundingClientRect();
-        return styleVisible(el) && intersectsVisibleClips(rect, el);
+        return styleVisible(el) && reachesTopLayer(rect, el);
       };
       const visibleText = node => {
         if (!styleVisible(node.parentElement)) return false;
         const range = document.createRange(); range.selectNodeContents(node);
-        return [...range.getClientRects()].some(rect => intersectsVisibleClips(rect, node.parentElement));
+        return [...range.getClientRects()].some(rect => reachesTopLayer(rect, node.parentElement));
       };
       const role = el => el.getAttribute('role') || (el.isContentEditable ? 'textbox' : ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase()));
       const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
