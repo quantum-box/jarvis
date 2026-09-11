@@ -656,6 +656,49 @@ describe('Realtime', () => {
 		expect(transport.track.stop).toHaveBeenCalled()
 	})
 
+	it('does not abort a newer start when a stale non-abortable stage rejects', async () => {
+		const firstTransport = makeTransport()
+		const secondTransport = makeTransport()
+		let rejectFirstOffer: ((reason: Error) => void) | undefined
+		firstTransport.peer.createOffer = vi.fn(
+			() => new Promise<RTCSessionDescriptionInit>((_resolve, reject) => {
+				rejectFirstOffer = reject
+			}),
+		)
+		let resolveSecondCall: ((value: Response) => void) | undefined
+		let secondSignal: AbortSignal | undefined
+		const secondCall = new Promise<Response>(resolve => {
+			resolveSecondCall = resolve
+		})
+		const fetchMock = vi.fn<typeof fetch>((_input, init) => {
+			secondSignal = init?.signal as AbortSignal
+			return secondCall
+		})
+		const transports = [firstTransport, secondTransport]
+		const streams = [firstTransport.stream, secondTransport.stream]
+		const client = new Realtime(settings, {}, {
+			fetch: fetchMock,
+			createPeerConnection: () =>
+				transports.shift()?.peer as unknown as RTCPeerConnection,
+			getUserMedia: vi.fn(async () => streams.shift() as MediaStream),
+		})
+
+		const firstStart = client.start()
+		await vi.waitFor(() => expect(firstTransport.peer.createOffer).toHaveBeenCalled())
+		await client.stop()
+		const secondStart = client.start()
+		await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+
+		rejectFirstOffer?.(new Error('late stale offer failure'))
+		await expect(firstStart).resolves.toBeUndefined()
+		expect(secondSignal?.aborted).toBe(false)
+
+		resolveSecondCall?.(response())
+		await secondStart
+		expect(client.getState()).toBe('connected')
+		await client.stop()
+	})
+
 	it('times out microphone startup and stops a stream that arrives late', async () => {
 		const transport = makeTransport()
 		let resolveMicrophone: ((stream: MediaStream) => void) | undefined

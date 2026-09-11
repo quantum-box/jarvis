@@ -402,8 +402,9 @@ export class Realtime {
 
 		const operation = ++this.operation
 		this.abortController?.abort()
-		this.abortController = new AbortController()
-		const signal = this.abortController.signal
+		const abortController = new AbortController()
+		this.abortController = abortController
+		const signal = abortController.signal
 		try {
 			validateBaseUrl(this.settings.baseUrl)
 		} catch (error) {
@@ -538,7 +539,7 @@ export class Realtime {
 			}
 		} catch (error) {
 			const current = this.isCurrent(operation, signal)
-			this.abortController?.abort()
+			abortController.abort()
 			if (
 				candidateCallId &&
 				candidateProtocol === 'live' &&

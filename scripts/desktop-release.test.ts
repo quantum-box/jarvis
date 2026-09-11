@@ -31,7 +31,10 @@ fs.mkdirSync(output, {recursive: true});
 fs.writeFileSync(output + '/Info.plist', 'fixture plist');
 `, { mode: 0o755 });
   writeFileSync(join(root, 'bin/plutil'), `#!/usr/bin/env node
-process.stdout.write('com.quantumbox.jarvis\\n');
+const key = process.argv[process.argv.indexOf('-extract') + 1];
+if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
+else if (key === 'NSMicrophoneUsageDescription') process.stdout.write('JARVIS needs microphone access.\\n');
+else process.exit(1);
 `, { mode: 0o755 });
   writeFileSync(join(root, 'bin/codesign'), `#!/usr/bin/env node
 if (process.argv.includes('-d')) process.stderr.write([
@@ -87,6 +90,18 @@ it('does not copy an archive when notarized app verification fails', () => {
   const result = f.run();
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain('Notarized app verification failed');
+  expect(() => readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/0.2.0/JARVIS.app.tar.gz'))).toThrow();
+}, 15_000);
+it('does not copy an archive when the microphone usage description is missing', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'bin/plutil'), `#!/usr/bin/env node
+const key = process.argv[process.argv.indexOf('-extract') + 1];
+if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
+else process.exit(1);
+`, { mode: 0o755 });
+  const result = f.run();
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('NSMicrophoneUsageDescription');
   expect(() => readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/0.2.0/JARVIS.app.tar.gz'))).toThrow();
 }, 15_000);
 it('rejects a version mismatch before building', () => {

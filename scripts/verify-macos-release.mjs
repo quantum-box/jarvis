@@ -10,7 +10,7 @@ function run(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8' });
   if (result.status !== 0) {
     const detail = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
-    throw new Error(`${command} ${args[0] || ''} failed (${result.status})${detail ? `: ${detail}` : ''}`);
+    throw new Error(`${command} ${args.join(' ')} failed (${result.status})${detail ? `: ${detail}` : ''}`);
   }
   return `${result.stdout || ''}\n${result.stderr || ''}`;
 }
@@ -20,6 +20,13 @@ readFileSync(infoPlist);
 const identifier = run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', infoPlist]).trim();
 if (identifier !== expectedIdentifier) {
   throw new Error(`Unexpected CFBundleIdentifier: ${identifier || '(empty)'}`);
+}
+const microphoneUsageDescription = run(
+  'plutil',
+  ['-extract', 'NSMicrophoneUsageDescription', 'raw', '-o', '-', infoPlist],
+).trim();
+if (!microphoneUsageDescription) {
+  throw new Error('NSMicrophoneUsageDescription must not be empty');
 }
 
 run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
