@@ -656,6 +656,78 @@ describe('Realtime', () => {
 		expect(transport.track.stop).toHaveBeenCalled()
 	})
 
+	it('times out microphone startup and stops a stream that arrives late', async () => {
+		const transport = makeTransport()
+		let resolveMicrophone: ((stream: MediaStream) => void) | undefined
+		const microphone = new Promise<MediaStream>(resolve => {
+			resolveMicrophone = resolve
+		})
+		const client = new Realtime(settings, {}, {
+			fetch: vi.fn<typeof fetch>().mockResolvedValue(response()),
+			createPeerConnection: () =>
+				transport.peer as unknown as RTCPeerConnection,
+			getUserMedia: vi.fn(() => microphone),
+			startupTimeouts: { microphoneMs: 5 },
+		})
+
+		await expect(client.start()).rejects.toMatchObject({
+			code: 'realtime_start_timeout_microphone',
+		})
+		expect(client.getState()).toBe('error')
+		resolveMicrophone?.(transport.stream)
+		await vi.waitFor(() => expect(transport.track.stop).toHaveBeenCalled())
+	})
+
+	it('leaves connecting and releases transport when Live readiness times out', async () => {
+		const transport = makeTransport()
+		const errors: string[] = []
+		const client = new Realtime(
+			{ ...settings, model: 'gpt-live-1' },
+			{ error: error => errors.push(error.code) },
+			{
+				fetch: vi.fn<typeof fetch>().mockResolvedValue(
+					new Response(JSON.stringify({
+						session: { id: 'live_test' },
+						transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+					}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+				),
+				createPeerConnection: () =>
+					transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+				startupTimeouts: { connectionReadyMs: 5 },
+			},
+		)
+
+		await client.start()
+		expect(client.getState()).toBe('connecting')
+		await vi.waitFor(() => expect(client.getState()).toBe('error'))
+		expect(errors).toContain('realtime_start_timeout_connection_ready')
+		expect(transport.peer.close).toHaveBeenCalled()
+		expect(transport.track.stop).toHaveBeenCalled()
+	})
+
+	it('cleans up a legacy remote session when remote SDP application times out', async () => {
+		const transport = makeTransport()
+		transport.peer.setRemoteDescription = vi.fn(() => new Promise<void>(() => undefined))
+		const fetchMock = vi.fn<typeof fetch>()
+			.mockResolvedValueOnce(response())
+			.mockResolvedValueOnce(new Response(null, { status: 204 }))
+		const client = new Realtime(settings, {}, {
+			fetch: fetchMock,
+			createPeerConnection: () =>
+				transport.peer as unknown as RTCPeerConnection,
+			getUserMedia: vi.fn(async () => transport.stream),
+			startupTimeouts: { remoteDescriptionMs: 5 },
+		})
+
+		await expect(client.start()).rejects.toMatchObject({
+			code: 'realtime_start_timeout_remote_sdp_apply',
+		})
+		expect(fetchMock).toHaveBeenCalledTimes(2)
+		expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: 'DELETE' })
+		expect(client.getState()).toBe('error')
+	})
+
 	it('surfaces provider errors and rejects unsafe Tachyon URLs before mic access', async () => {
 		const getUserMedia = vi.fn()
 		const client = new Realtime(

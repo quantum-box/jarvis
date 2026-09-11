@@ -93,6 +93,15 @@ export interface RealtimeDependencies {
 	) => Promise<MediaStream>
 	createAudioElement?: () => HTMLAudioElement
 	now?: () => number
+	startupTimeouts?: Partial<RealtimeStartupTimeouts>
+}
+
+export interface RealtimeStartupTimeouts {
+	microphoneMs: number
+	localDescriptionMs: number
+	createCallMs: number
+	remoteDescriptionMs: number
+	connectionReadyMs: number
 }
 
 export interface RealtimeSessionUpdate {
@@ -139,6 +148,13 @@ export const DEFAULT_LIVE_BACKEND_MODEL = 'gpt-5.6-terra'
 export const normalizeRealtimeModel = (model: string) =>
 	model || DEFAULT_REALTIME_MODEL
 const DEFAULT_VOICE = 'marin'
+const DEFAULT_STARTUP_TIMEOUTS: RealtimeStartupTimeouts = {
+	microphoneMs: 30_000,
+	localDescriptionMs: 15_000,
+	createCallMs: 30_000,
+	remoteDescriptionMs: 15_000,
+	connectionReadyMs: 30_000,
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -232,7 +248,8 @@ const toErrorMessage = (error: unknown, fallback: string) =>
  */
 export class Realtime {
 	private readonly settings: RealtimeSettings
-	private readonly dependencies: Required<RealtimeDependencies>
+	private readonly dependencies: Omit<Required<RealtimeDependencies>, 'startupTimeouts'>
+	private readonly startupTimeouts: RealtimeStartupTimeouts
 	private readonly listeners = new Map<
 		keyof RealtimeEventMap,
 		Set<AnyListener>
@@ -257,6 +274,7 @@ export class Realtime {
 	private cleanupPromises = new Map<string, Promise<void>>()
 	private cleanedCallIds = new Set<string>()
 	private stopPromise: Promise<void> | null = null
+	private startupTimer: ReturnType<typeof setTimeout> | null = null
 
 	constructor(
 		settings: RealtimeSettings,
@@ -288,6 +306,10 @@ export class Realtime {
 			createAudioElement:
 				dependencies.createAudioElement ?? (() => new Audio()),
 			now: dependencies.now ?? (() => performance.now()),
+		}
+		this.startupTimeouts = {
+			...DEFAULT_STARTUP_TIMEOUTS,
+			...dependencies.startupTimeouts,
 		}
 
 		for (const eventName of Object.keys(listeners) as Array<
@@ -398,6 +420,7 @@ export class Realtime {
 		this.liveSessionStarted = false
 		this.transcriptBuffers.clear()
 		this.liveTranscriptSequences = { user: 0, assistant: 0 }
+		this.clearStartupTimer()
 		this.disposeTransport()
 
 		let candidateTransport: Transport = { ...EMPTY_TRANSPORT }
@@ -412,14 +435,23 @@ export class Realtime {
 			this.transport = candidateTransport
 			this.installPeerConnectionHandlers(candidateTransport, operation)
 
-			candidateTransport.localStream =
-				await this.dependencies.getUserMedia({
+			const microphone = this.dependencies.getUserMedia({
 					audio: {
 						echoCancellation: true,
 						noiseSuppression: true,
 						autoGainControl: true,
 					},
 				})
+			void microphone.then(stream => {
+				if (!this.isCurrent(operation, signal)) {
+					for (const track of stream.getTracks()) track.stop()
+				}
+			}).catch(() => undefined)
+			candidateTransport.localStream = await this.awaitStartupStage(
+				microphone,
+				'microphone',
+				this.startupTimeouts.microphoneMs,
+			)
 
 			if (!this.isCurrent(operation, signal)) {
 				this.disposeTransport(candidateTransport)
@@ -438,19 +470,31 @@ export class Realtime {
 				candidateTransport.peerConnection.createDataChannel('oai-events')
 			this.installDataChannelHandlers(candidateTransport.dataChannel, operation)
 
-			const offer = await candidateTransport.peerConnection.createOffer()
-			await candidateTransport.peerConnection.setLocalDescription(offer)
+			const offer = await this.awaitStartupStage(
+				candidateTransport.peerConnection.createOffer(),
+				'local_sdp_offer',
+				this.startupTimeouts.localDescriptionMs,
+			)
+			await this.awaitStartupStage(
+				candidateTransport.peerConnection.setLocalDescription(offer),
+				'local_sdp_apply',
+				this.startupTimeouts.localDescriptionMs,
+			)
 
 			if (!this.isCurrent(operation, signal)) {
 				this.disposeTransport(candidateTransport)
 				return
 			}
 
-			const call = await this.createCall(
-			candidateTransport.peerConnection.localDescription?.sdp ??
-				offer.sdp ??
-				'',
-				signal,
+			const call = await this.awaitStartupStage(
+				this.createCall(
+					candidateTransport.peerConnection.localDescription?.sdp ??
+						offer.sdp ??
+						'',
+					signal,
+				),
+				'tachyon_session',
+				this.startupTimeouts.createCallMs,
 			)
 			candidateCallId = call.callId
 			candidateProtocol = call.protocol
@@ -467,10 +511,14 @@ export class Realtime {
 			this.currentCallId = call.callId
 			this.currentSideband = call.sideband
 			this.currentProtocol = call.protocol
-			await candidateTransport.peerConnection.setRemoteDescription({
-				type: 'answer',
-				sdp: call.sdp,
-			})
+			await this.awaitStartupStage(
+				candidateTransport.peerConnection.setRemoteDescription({
+					type: 'answer',
+					sdp: call.sdp,
+				}),
+				'remote_sdp_apply',
+				this.startupTimeouts.remoteDescriptionMs,
+			)
 
 			if (!this.isCurrent(operation, signal)) {
 				this.disposeTransport(candidateTransport)
@@ -485,14 +533,36 @@ export class Realtime {
 			this.peerConnected =
 				candidateTransport.peerConnection.connectionState === 'connected'
 			this.maybeSetConnected()
+			if (this.getState() === 'connecting') {
+				this.armConnectionReadyTimeout(operation)
+			}
 		} catch (error) {
+			const current = this.isCurrent(operation, signal)
+			this.abortController?.abort()
+			if (
+				candidateCallId &&
+				candidateProtocol === 'live' &&
+				candidateTransport.dataChannel?.readyState === 'open'
+			) {
+				candidateTransport.dataChannel.send(JSON.stringify({ type: 'session.close' }))
+			}
 			this.disposeTransport(candidateTransport)
 
-			if (!this.isCurrent(operation, signal) || isAbortError(error)) {
+			if (!current || isAbortError(error)) {
 				if (candidateCallId && candidateProtocol === 'realtime') {
 					await this.cleanupRemoteSession(candidateCallId)
 				}
 				return
+			}
+			if (candidateCallId && candidateProtocol === 'realtime') {
+				try {
+					await this.cleanupRemoteSession(candidateCallId)
+				} catch (cleanupError) {
+					this.emit(
+						'error',
+						this.toRealtimeError(cleanupError, 'realtime_cleanup_failed'),
+					)
+				}
 			}
 
 			const realtimeError = this.toRealtimeError(error, 'realtime_start_failed')
@@ -513,6 +583,7 @@ export class Realtime {
 		}
 
 		const operation = ++this.operation
+		this.clearStartupTimer()
 		this.abortController?.abort()
 		this.abortController = null
 		const callId = this.currentCallId
@@ -1110,6 +1181,9 @@ export class Realtime {
 		if (this.currentState === nextState) {
 			return
 		}
+		if (nextState !== 'connecting') {
+			this.clearStartupTimer()
+		}
 		this.currentState = nextState
 		this.emit('state', nextState)
 	}
@@ -1120,7 +1194,61 @@ export class Realtime {
 			this.peerConnected &&
 			(this.currentProtocol !== 'live' || this.liveSessionStarted)
 		) {
+			this.clearStartupTimer()
 			this.setState('connected')
+		}
+	}
+
+	private awaitStartupStage<T>(
+		promise: Promise<T>,
+		stage: string,
+		timeoutMs: number,
+	): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				reject(new RealtimeError(`Realtime startup timed out during ${stage}`, {
+					code: `realtime_start_timeout_${stage}`,
+					recoverable: true,
+				}))
+			}, timeoutMs)
+			promise.then(
+				value => { clearTimeout(timer); resolve(value) },
+				error => { clearTimeout(timer); reject(error) },
+			)
+		})
+	}
+
+	private armConnectionReadyTimeout(operation: number) {
+		this.clearStartupTimer()
+		this.startupTimer = setTimeout(() => {
+			if (!this.isCurrent(operation) || this.currentState !== 'connecting') return
+			const error = new RealtimeError(
+				'Realtime startup timed out waiting for the peer and session to become ready',
+				{ code: 'realtime_start_timeout_connection_ready', recoverable: true },
+			)
+			this.operation += 1
+			this.abortController?.abort()
+			this.abortController = null
+			if (this.currentProtocol === 'live' && this.transport.dataChannel?.readyState === 'open') {
+				this.transport.dataChannel.send(JSON.stringify({ type: 'session.close' }))
+			} else if (this.currentCallId && this.currentProtocol === 'realtime') {
+				void this.cleanupRemoteSession(this.currentCallId).catch(cleanupError => {
+					this.emit('error', this.toRealtimeError(cleanupError, 'realtime_cleanup_failed'))
+				})
+			}
+			this.currentCallId = null
+			this.currentSideband = null
+			this.currentProtocol = null
+			this.disposeTransport()
+			this.setState('error')
+			this.emit('error', error)
+		}, this.startupTimeouts.connectionReadyMs)
+	}
+
+	private clearStartupTimer() {
+		if (this.startupTimer) {
+			clearTimeout(this.startupTimer)
+			this.startupTimer = null
 		}
 	}
 

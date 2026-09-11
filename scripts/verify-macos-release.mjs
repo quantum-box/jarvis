@@ -1,0 +1,51 @@
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+
+const [appPath, expectedIdentifier, expectedIdentity, expectedTeamId] = process.argv.slice(2);
+if (!appPath || !expectedIdentifier || !expectedIdentity || !expectedTeamId) {
+  throw new Error('Usage: node scripts/verify-macos-release.mjs <app> <bundle-id> <identity> <team-id>');
+}
+
+function run(command, args) {
+  const result = spawnSync(command, args, { encoding: 'utf8' });
+  if (result.status !== 0) {
+    const detail = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+    throw new Error(`${command} ${args[0] || ''} failed (${result.status})${detail ? `: ${detail}` : ''}`);
+  }
+  return `${result.stdout || ''}\n${result.stderr || ''}`;
+}
+
+const infoPlist = `${appPath}/Contents/Info.plist`;
+readFileSync(infoPlist);
+const identifier = run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', infoPlist]).trim();
+if (identifier !== expectedIdentifier) {
+  throw new Error(`Unexpected CFBundleIdentifier: ${identifier || '(empty)'}`);
+}
+
+run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
+const signature = run('codesign', ['-d', '--verbose=4', appPath]);
+const fields = new Map(
+  signature.split(/\r?\n/).flatMap(line => {
+    const match = line.match(/^([^=]+)=(.*)$/);
+    return match ? [[match[1], match[2]]] : [];
+  }),
+);
+if (fields.get('Identifier') !== expectedIdentifier) {
+  throw new Error(`Code signature identifier does not match ${expectedIdentifier}`);
+}
+if (fields.get('TeamIdentifier') !== expectedTeamId) {
+  throw new Error(`Code signature team does not match ${expectedTeamId}`);
+}
+const authorities = signature.split(/\r?\n/)
+  .filter(line => line.startsWith('Authority='))
+  .map(line => line.slice('Authority='.length));
+if (!authorities.includes(expectedIdentity)) {
+  throw new Error(`Code signature authority does not match ${expectedIdentity}`);
+}
+
+const assessment = run('spctl', ['--assess', '--type', 'execute', '--verbose=4', appPath]);
+if (!/source=Notarized Developer ID/i.test(assessment)) {
+  throw new Error('Gatekeeper did not report a notarized Developer ID source');
+}
+run('xcrun', ['stapler', 'validate', appPath]);
+console.log(`Verified notarized macOS release: ${appPath}`);
