@@ -31,6 +31,21 @@ it('checks once at startup and never installs without a request', async () => {
   expect(c.getSnapshot()).toMatchObject({ phase: 'available', currentVersion: '0.1.0', version: '0.2.0' });
   expect(update.downloadAndInstall).not.toHaveBeenCalled();
 });
+it('shares an in-flight startup initialization with StrictMode remounts', async () => {
+  let resolveAvailability!: (value: 'ready') => void;
+  vi.mocked(invoke).mockImplementationOnce(() => new Promise(resolve => { resolveAvailability = resolve; }));
+  const c = new UpdateController();
+  const first = c.initialize();
+  const second = c.initialize();
+  let secondSettled = false;
+  void second.then(() => { secondSettled = true; });
+  await Promise.resolve();
+  expect(secondSettled).toBe(false);
+  resolveAvailability('ready');
+  await Promise.all([first, second]);
+  expect(check).toHaveBeenCalledTimes(1);
+  expect(c.getSnapshot()).toMatchObject({ phase: 'available', version: '0.2.0' });
+});
 it('handles no update and retries after a network error', async () => {
   vi.mocked(check).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(null);
   const c = new UpdateController(); await c.initialize();
