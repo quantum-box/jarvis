@@ -14,7 +14,13 @@ const snapshot: BrowserSnapshot = {
 	revision: 3,
 	text: 'Untrusted page text',
 	elements: [
-		{ ref: 'e3-1', role: 'link', label: 'ヘルプ', href: 'https://example.com/help' },
+		{
+			ref: 'e3-1',
+			role: 'link',
+			label: 'ヘルプ',
+			hrefOrigin: 'https://example.com',
+			hrefHasPayload: true,
+		},
 		{ ref: 'e3-2', role: 'button', label: '削除する' },
 		{ ref: 'e3-3', role: 'textbox', label: '検索' },
 	],
@@ -93,7 +99,8 @@ describe('BrowserToolRunner', () => {
 					ref: 'e3-4',
 					role: 'link',
 					label: '外部サイト',
-					href: 'https://example.net/?data=page-content',
+					hrefOrigin: 'https://example.net',
+					hrefHasPayload: true,
 				},
 			],
 		}

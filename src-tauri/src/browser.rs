@@ -41,6 +41,14 @@ mod platform {
             .ok_or_else(|| "ブラウザを先に開いてください。".into())
     }
 
+    pub(crate) fn safe_url_summary(url: &tauri::Url) -> String {
+        let mut safe = url.clone();
+        safe.set_path("/");
+        safe.set_query(None);
+        safe.set_fragment(None);
+        safe.to_string()
+    }
+
     fn create_window(
         app: &AppHandle,
         url: tauri::Url,
@@ -156,7 +164,7 @@ mod platform {
         let url = browser
             .as_ref()
             .and_then(|window| window.url().ok())
-            .map(|url| url.to_string());
+            .map(|url| safe_url_summary(&url));
         let always_on_top = browser
             .as_ref()
             .and_then(|window| window.is_always_on_top().ok())
@@ -199,15 +207,25 @@ mod platform {
         const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0;
       };
-      const role = el => el.getAttribute('role') || ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase());
-      const label = el => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name')).slice(0, 180);
+      const role = el => el.getAttribute('role') || (el.isContentEditable ? 'textbox' : ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase()));
+      const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
+      const label = el => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || (valueControl(el) ? '' : el.innerText)).slice(0, 180);
+      const link = el => {
+        if (!el.href) return {};
+        try {
+          const url = new URL(el.href);
+          return {hrefOrigin:url.origin,hrefHasPayload:url.pathname !== '/' || Boolean(url.search) || Boolean(url.hash)};
+        } catch {
+          return {hrefOrigin:'invalid',hrefHasPayload:true};
+        }
+      };
       const fingerprint = el => JSON.stringify({tag:el.tagName,role:role(el),label:label(el),type:el.getAttribute('type') || '',href:el.href || ''});
       const candidates = [...document.querySelectorAll('a[href],button,input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],[tabindex]')]
         .filter(visible).slice(0, 80);
       const elements = candidates.map((el, index) => {
         const ref = `e${state.revision}-${index + 1}`; const fp = fingerprint(el);
         state.refs.set(ref, {el, fingerprint:fp, url:location.href, origin:location.origin, revision:state.revision, href:el.href || null});
-        return {ref, role:role(el), label:label(el), type:el.getAttribute('type') || undefined, href:el.href || undefined};
+        return {ref, role:role(el), label:label(el), type:el.getAttribute('type') || undefined, ...link(el)};
       });
       const excluded = el => el?.closest?.('script,style,noscript,input,textarea,select,[contenteditable="true"],[aria-hidden="true"]');
       const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
@@ -219,7 +237,7 @@ mod platform {
       }
       state.observer = new MutationObserver(() => { state.revision += 1; state.refs.clear(); });
       state.observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,characterData:true});
-      return {title:clean(document.title).slice(0,200),url:location.href,origin:location.origin,revision:state.revision,text:text.join('\n').slice(0,6000),elements};
+      return {title:clean(document.title).slice(0,200),url:location.origin,origin:location.origin,revision:state.revision,text:text.join('\n').slice(0,6000),elements};
     })()"#;
 
     fn ref_script(reference: String, action: &str) -> String {
@@ -229,8 +247,9 @@ mod platform {
               const state = globalThis.__jarvisManagedBrowserV1; const ref = {reference}; const entry = state?.refs?.get(ref);
               if (!entry || entry.revision !== state.revision || entry.url !== location.href || entry.origin !== location.origin) return {{ok:false,error:'stale_reference'}};
               const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-              const role = el => el.getAttribute('role') || ({{A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}}[el.tagName] || el.tagName.toLowerCase());
-              const label = el => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name')).slice(0,180);
+              const role = el => el.getAttribute('role') || (el.isContentEditable ? 'textbox' : ({{A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}}[el.tagName] || el.tagName.toLowerCase()));
+              const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
+              const label = el => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || (valueControl(el) ? '' : el.innerText)).slice(0,180);
               const fingerprint = el => JSON.stringify({{tag:el.tagName,role:role(el),label:label(el),type:el.getAttribute('type') || '',href:el.href || ''}});
               if (!entry.el?.isConnected || fingerprint(entry.el) !== entry.fingerprint) return {{ok:false,error:'stale_reference'}};
               {action}
@@ -244,7 +263,7 @@ mod platform {
 
     pub async fn click(app: &AppHandle, reference: String) -> Result<Value, String> {
         let browser = window(app)?;
-        let result = eval(
+        let mut result = eval(
             &browser,
             ref_script(
                 reference,
@@ -260,9 +279,24 @@ mod platform {
                 .get("href")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "リンク先を確認できませんでした。".to_string())?;
+            let target = validate_url(href)?;
+            let destination_origin = safe_url_summary(&target);
+            let destination_has_payload =
+                target.path() != "/" || target.query().is_some() || target.fragment().is_some();
             browser
-                .navigate(validate_url(href)?)
+                .navigate(target)
                 .map_err(|_| "リンク先を開けませんでした。".to_string())?;
+            if let Some(object) = result.as_object_mut() {
+                object.remove("href");
+                object.insert(
+                    "destinationOrigin".into(),
+                    Value::String(destination_origin),
+                );
+                object.insert(
+                    "destinationHasPayload".into(),
+                    Value::Bool(destination_has_payload),
+                );
+            }
         }
         Ok(result)
     }
@@ -476,3 +510,15 @@ pub async fn browser_forward(app: AppHandle) -> Result<Value, String> {
 
 #[cfg(target_os = "macos")]
 pub use platform::{clear_current_storage, ensure_window};
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::platform::safe_url_summary;
+
+    #[test]
+    fn strips_path_query_and_fragment_from_reported_urls() {
+        let url =
+            tauri::Url::parse("https://example.com/private/token?secret=value#fragment").unwrap();
+        assert_eq!(safe_url_summary(&url), "https://example.com/");
+    }
+}

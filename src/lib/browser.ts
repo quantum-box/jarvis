@@ -13,7 +13,8 @@ export interface BrowserElement {
 	role: string
 	label: string
 	type?: string
-	href?: string
+	hrefOrigin?: string
+	hrefHasPayload?: boolean
 }
 
 export interface BrowserSnapshot {
@@ -299,7 +300,7 @@ export class BrowserToolRunner {
 					})
 					const element = this.element(textArg(args, 'reference'))
 					this.snapshot = null
-					if (!element?.href) {
+					if (!element?.hrefOrigin) {
 						const after = await this.request<BrowserSnapshot>('snapshot')
 						this.snapshot = after
 						output = { action: output, after }
@@ -372,15 +373,21 @@ export class BrowserToolRunner {
 			detail = value.length > 120 ? `${value.slice(0, 120)}…` : value
 		} else if (operation === 'click') {
 			const element = this.element(textArg(args, 'reference'))
-			if (element?.href) {
+			if (element?.hrefOrigin) {
 				const sameOrigin = this.snapshot
-					? new URL(element.href).origin === this.snapshot.origin
+					? element.hrefOrigin === this.snapshot.origin
 					: false
 				explicit =
 					sameOrigin ||
-					explicitlyNamesPlainDestination(this.utterance, element.href)
+					(!element.hrefHasPayload &&
+						explicitlyNamesPlainDestination(
+							this.utterance,
+							element.hrefOrigin,
+						))
 				description = `${element.label || 'リンク'}を開きます。`
-				detail = element.href
+				detail = element.hrefHasPayload
+					? `${element.hrefOrigin}（リンク先のpath・queryはAIへ表示しません）`
+					: element.hrefOrigin
 			} else {
 				const label = element?.label || 'ページ上の操作'
 				const labelExplicit = utteranceContains(this.utterance, label)
