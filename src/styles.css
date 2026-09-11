@@ -685,3 +685,8 @@ button svg {
 .update-notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 180px; overflow-y: auto; }
 .app-update progress { max-width: 100%; accent-color: #d7b779; }
 .update-dot { width: 6px; height: 6px; border-radius: 50%; background: #d7b779; }
+.update-prompt-dialog { width: min(440px, calc(100% - 32px)); }
+.update-prompt-dialog h2 { margin: 8px 0 14px; font-size: 22px; }
+.update-prompt-dialog > p { line-height: 1.8; }
+.update-prompt-actions { display: flex; justify-content: flex-end; align-items: center; gap: 14px; margin-top: 24px; }
+.update-prompt-actions .primary { padding: 11px 18px; }

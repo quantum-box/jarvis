@@ -19,6 +19,7 @@ import { CoreScene } from "./components/CoreScene";
 import { Settings, loadSettings } from "./components/Settings";
 import { UpdateController } from "./lib/updater";
 import { AppUpdate } from "./components/AppUpdate";
+import { StartupUpdatePrompt, startupUpdateVersion as getStartupUpdateVersion } from "./components/StartupUpdatePrompt";
 import { listenForUpdateCheck } from "./lib/app-menu";
 import { Login } from './components/Login';
 import { AuthSession } from './lib/auth';
@@ -36,7 +37,17 @@ import {
 export default function App() {
   const [updater] = useState(() => new UpdateController());
   const updateState = useSyncExternalStore(updater.subscribe, updater.getSnapshot);
-  useEffect(() => { void updater.initialize(); }, [updater]);
+  const [startupUpdateVersion, setStartupUpdateVersion] = useState<string | null>(null);
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    void updater.initialize().then(() => {
+      if (disposed) return;
+      const state = updater.getSnapshot();
+      setStartupUpdateVersion(getStartupUpdateVersion(state));
+    });
+    return () => { disposed = true; };
+  }, [updater]);
   const [settings, setSettings] = useState(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
   const [showConversation, setShowConversation] = useState(false);
@@ -59,6 +70,7 @@ export default function App() {
   const messageEnd = useRef<HTMLDivElement>(null);
   const connected = state === "connected";
   const busy = state === "connecting";
+  const conversationActive = connected || busy;
   const textInputSupported = normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL;
   useEffect(() => {
     let removeListener: (() => void) | undefined;
@@ -436,7 +448,7 @@ export default function App() {
       </div>
       {showSettings && !restoring && (
         <Settings
-          appUpdate={<AppUpdate controller={updater} conversationActive={connected || busy} />}
+          appUpdate={<AppUpdate controller={updater} conversationActive={conversationActive} />}
           value={settings}
           onChange={setSettings}
           onClose={() => setShowSettings(false)}
@@ -444,6 +456,23 @@ export default function App() {
           tenants={identity?.tenants}
         />
       )}
+      {startupUpdateVersion &&
+        updateState.phase === 'available' &&
+        updateState.version === startupUpdateVersion &&
+        dismissedUpdateVersion !== startupUpdateVersion && (
+          <StartupUpdatePrompt
+            currentVersion={updateState.currentVersion}
+            version={startupUpdateVersion}
+            notes={updateState.notes}
+            conversationActive={conversationActive}
+            onLater={() => setDismissedUpdateVersion(startupUpdateVersion)}
+            onInstall={() => {
+              setDismissedUpdateVersion(startupUpdateVersion);
+              setShowSettings(true);
+              void updater.install(conversationActive);
+            }}
+          />
+        )}
       {loginSession && <Login auth={loginSession} onAuthenticated={() => finishLogin(loginSession)} onClose={cancelLogin}/>}
     </div>
   );
