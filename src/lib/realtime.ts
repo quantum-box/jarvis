@@ -136,6 +136,8 @@ const EMPTY_TRANSPORT: Transport = {
 
 export const DEFAULT_REALTIME_MODEL = 'gpt-live-1'
 export const DEFAULT_LIVE_BACKEND_MODEL = 'gpt-5.6-terra'
+export const normalizeRealtimeModel = (model: string) =>
+	model || DEFAULT_REALTIME_MODEL
 const DEFAULT_VOICE = 'marin'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -263,7 +265,7 @@ export class Realtime {
 	) {
 		this.settings = {
 			...settings,
-			model: settings.model || DEFAULT_REALTIME_MODEL,
+			model: normalizeRealtimeModel(settings.model),
 			backendModel: settings.backendModel || DEFAULT_LIVE_BACKEND_MODEL,
 			voice: settings.voice || DEFAULT_VOICE,
 		}
@@ -487,7 +489,7 @@ export class Realtime {
 			this.disposeTransport(candidateTransport)
 
 			if (!this.isCurrent(operation, signal) || isAbortError(error)) {
-				if (candidateCallId) {
+				if (candidateCallId && candidateProtocol === 'realtime') {
 					await this.cleanupRemoteSession(candidateCallId)
 				}
 				return
@@ -533,6 +535,11 @@ export class Realtime {
 			track.stop()
 		}
 		this.muted = false
+		// Live needs the data channel briefly for session.close. Legacy cleanup is
+		// an independent HTTP request, so release local audio and WebRTC first.
+		if (protocol !== 'live') {
+			this.disposeTransport()
+		}
 
 		this.stopPromise = (async () => {
 			try {
@@ -936,7 +943,10 @@ export class Realtime {
 			if (!this.isCurrent(operation)) {
 				return
 			}
-			if (this.currentState === 'connected') {
+			if (
+				this.currentState === 'connecting' ||
+				this.currentState === 'connected'
+			) {
 				this.handleDisconnect('data-channel-closed')
 			}
 		}
@@ -995,6 +1005,12 @@ export class Realtime {
 					cause: event.error,
 				}),
 			)
+			if (
+				this.currentState === 'connecting' ||
+				this.currentState === 'connected'
+			) {
+				this.setState('error')
+			}
 			return
 		}
 
@@ -1324,7 +1340,10 @@ export class RealtimeClient {
 			return
 		}
 
-		if (type === 'input_audio_buffer.speech_stopped') {
+		if (
+			type === 'input_audio_buffer.speech_stopped' ||
+			type === 'session.input_transcript.delta'
+		) {
 			this.resetResponseAudioState()
 			this.setActivity('thinking')
 			return
@@ -1339,7 +1358,8 @@ export class RealtimeClient {
 		if (
 			type === 'output_audio_buffer.started' ||
 			type === 'response.audio.delta' ||
-			type === 'response.output_audio.delta'
+			type === 'response.output_audio.delta' ||
+			type === 'session.output_transcript.delta'
 		) {
 			this.responseAudioSeen = true
 			this.responseAudioDone = false

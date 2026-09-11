@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+	DEFAULT_REALTIME_MODEL,
 	Realtime,
 	RealtimeClient,
+	normalizeRealtimeModel,
 	type AssistantActivity,
 	type RealtimeSettings,
 } from './realtime'
@@ -103,6 +105,10 @@ afterEach(() => {
 })
 
 describe('Realtime', () => {
+	it('normalizes an empty model to GPT Live for API and UI consumers', () => {
+		expect(normalizeRealtimeModel('')).toBe(DEFAULT_REALTIME_MODEL)
+	})
+
 	it.each([
 		['gpt-realtime-2.1', 'gpt-realtime-2.1'],
 		['gpt-realtime-2', 'gpt-realtime-2'],
@@ -189,6 +195,80 @@ describe('Realtime', () => {
 		await stopping
 		expect(fetchMock).toHaveBeenCalledTimes(1)
 		expect(client.getState()).toBe('disconnected')
+	})
+
+	it.each([
+		['a provider error', () => ({
+			type: 'error',
+			error: { code: 'live_failed', message: 'Live failed' },
+		})],
+		['a data-channel close', () => null],
+	])('exits connecting when GPT Live startup ends with %s', async (_label, event) => {
+		const transport = makeTransport()
+		const client = new Realtime(
+			{ ...settings, model: 'gpt-live-1' },
+			{},
+			{
+				fetch: vi.fn<typeof fetch>().mockResolvedValue(
+					new Response(JSON.stringify({
+						session: { id: 'live_test' },
+						transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+					}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+				),
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+			},
+		)
+
+		await client.start()
+		expect(client.getState()).toBe('connecting')
+		const payload = event()
+		if (payload) {
+			transport.dataChannel.onmessage?.({ data: JSON.stringify(payload) })
+		} else {
+			transport.dataChannel.onclose?.()
+		}
+		expect(client.getState()).toBe('error')
+
+		transport.dataChannel.readyState = 'closed'
+		await client.stop()
+	})
+
+	it('does not call the legacy cleanup endpoint when a Live start is cancelled', async () => {
+		const transport = makeTransport()
+		let rejectRemoteDescription: ((reason: Error) => void) | undefined
+		transport.peer.setRemoteDescription = vi.fn(
+			() => new Promise<void>((_resolve, reject) => {
+				rejectRemoteDescription = reject
+			}),
+		)
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+			new Response(JSON.stringify({
+				session: { id: 'live_test' },
+				transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+			}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+		)
+		const client = new Realtime(
+			{ ...settings, model: 'gpt-live-1' },
+			{},
+			{
+				fetch: fetchMock,
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+			},
+		)
+
+		const starting = client.start()
+		await vi.waitFor(() => expect(transport.peer.setRemoteDescription).toHaveBeenCalled())
+		const stopping = client.stop()
+		rejectRemoteDescription?.(new Error('cancelled while applying SDP'))
+		transport.dataChannel.onmessage?.({
+			data: JSON.stringify({ type: 'session.closed' }),
+		})
+
+		await expect(starting).resolves.toBeUndefined()
+		await stopping
+		expect(fetchMock).toHaveBeenCalledTimes(1)
 	})
 
 	it('handles GPT Live input and output transcript events', async () => {
@@ -394,6 +474,68 @@ describe('Realtime', () => {
 		])
 
 		await client.disconnect()
+	})
+
+	it('maps GPT Live transcript events to thinking and speaking activity', async () => {
+		const transport = makeTransport()
+		const activities: AssistantActivity[] = []
+		const client = new RealtimeClient({
+			onActivityChange: activity => activities.push(activity),
+		})
+
+		await client.connect(
+			{ ...settings, model: 'gpt-live-1' },
+			{
+				fetch: vi.fn<typeof fetch>().mockResolvedValue(
+					new Response(JSON.stringify({
+						session: { id: 'live_test' },
+						transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+					}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+				),
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+			},
+		)
+		transport.dataChannel.onmessage?.({
+			data: JSON.stringify({ type: 'session.started' }),
+		})
+		activities.length = 0
+
+		transport.dataChannel.onmessage?.({
+			data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello' }),
+		})
+		expect(client.getActivity()).toBe('thinking')
+		transport.dataChannel.onmessage?.({
+			data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'Hi' }),
+		})
+		expect(client.getActivity()).toBe('speaking')
+		expect(activities).toEqual(['thinking', 'speaking'])
+
+		transport.dataChannel.readyState = 'closed'
+		await client.disconnect()
+	})
+
+	it('releases legacy WebRTC before waiting for remote cleanup', async () => {
+		const transport = makeTransport()
+		let resolveCleanup: ((response: Response) => void) | undefined
+		const cleanup = new Promise<Response>(resolve => {
+			resolveCleanup = resolve
+		})
+		const fetchMock = vi.fn<typeof fetch>()
+			.mockResolvedValueOnce(response())
+			.mockImplementationOnce(() => cleanup)
+		const client = new Realtime(settings, {}, {
+			fetch: fetchMock,
+			createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+			getUserMedia: vi.fn(async () => transport.stream),
+		})
+		await client.start()
+
+		const stopping = client.stop()
+		expect(transport.peer.close).toHaveBeenCalled()
+		expect(transport.track.stop).toHaveBeenCalled()
+		resolveCleanup?.(new Response(null, { status: 204 }))
+		await stopping
 	})
 
 	it('resets activity and levels after a realtime error', async () => {

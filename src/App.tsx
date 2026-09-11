@@ -25,6 +25,7 @@ import { nativeSessionStore } from './lib/session-store';
 import { apiOrigin, createChatroom, establishTachyonIdentity, userTokenFetch, type TachyonIdentity } from './lib/tachyon';
 import {
   DEFAULT_REALTIME_MODEL,
+  normalizeRealtimeModel,
   RealtimeClient,
   type RealtimeState,
   type AssistantActivity,
@@ -57,7 +58,7 @@ export default function App() {
   const messageEnd = useRef<HTMLDivElement>(null);
   const connected = state === "connected";
   const busy = state === "connecting";
-  const textInputSupported = settings.model !== DEFAULT_REALTIME_MODEL;
+  const textInputSupported = normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL;
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     const endSession = () => { void client.current?.disconnect(); };

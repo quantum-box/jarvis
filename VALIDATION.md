@@ -6,7 +6,7 @@
 - Ran the JARVIS `Realtime` browser adapter against a local Tachyon API backed by the real OpenAI provider. The Live session returned HTTP 201, then emitted `data_channel.open` and `session.started`; WebRTC and ICE both reached `connected` with no client error.
 - Confirmed the matching Tachyon audit event stores `model=gpt-live-1` and `delegation=responses`. No credential or SDP was recorded in this document.
 - Verified the settings UI shows the new Live and backend defaults. Live waits for `session.started`, consumes timestamped input/output transcript deltas, sends Live mute/unmute commands, and attempts graceful `session.close`. Because GPT Live has no general running-session text-message equivalent to Realtime's conversation item event, the composer is disabled in Live mode instead of silently producing a backend-only answer.
-- `npm test`: 68 tests passed. `npm run typecheck`, `npm run build`, `cargo +stable fmt --check`, clippy with warnings denied, Rust tests, and updater-enabled `cargo check` passed. The Keychain test remains intentionally ignored because it writes to the real macOS Keychain.
+- `npm test`: 74 tests passed. `npm run typecheck`, `npm run build`, `cargo +stable fmt --check`, clippy with warnings denied, Rust tests, and updater-enabled `cargo check` passed. The Keychain test remains intentionally ignored because it writes to the real macOS Keychain.
 - Not verified: real microphone speech recognition, audible remote playback, native Tauri UI login, signed application packaging, CI, deployment, or release publication.
 
 2026-09-11 / macOS

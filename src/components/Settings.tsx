@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X, ShieldCheck } from "lucide-react";
-import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL } from "../lib/realtime";
+import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL, normalizeRealtimeModel } from "../lib/realtime";
 export interface ConnectionSettings {
   baseUrl: string;
   tenantId: string;
@@ -66,6 +66,7 @@ export function Settings({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [saveError, setSaveError] = useState("");
+  const liveModelSelected = normalizeRealtimeModel(value.model) === DEFAULT_REALTIME_MODEL;
   useEffect(() => {
     dialog.current?.showModal();
   }, []);
@@ -121,7 +122,7 @@ export function Settings({
         {field("chatroomId", "Chatroom ID", "空欄なら会話開始時に自動作成")}
         <div className="field-row">
           {field("model", "Model")}
-          {value.model !== DEFAULT_REALTIME_MODEL && <label>
+          {!liveModelSelected && <label>
             Voice
             <select
               value={value.voice}
@@ -144,7 +145,7 @@ export function Settings({
             </select>
           </label>}
         </div>
-        {value.model === DEFAULT_REALTIME_MODEL &&
+        {liveModelSelected &&
           field("backendModel", "Responses backend model", DEFAULT_LIVE_BACKEND_MODEL)}
         <label>
           パーソナリティ
