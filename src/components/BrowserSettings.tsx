@@ -64,6 +64,7 @@ export function BrowserSettings() {
 				const result = await invoke<{
 					domain: string
 					cookiesDeleted: number
+					cookiesFailed: number
 					currentOriginStorageStatus: 'notMatched' | 'cleared' | 'partialFailure'
 				}>('clear_browser_site_data', { domain: domain.trim() })
 				const storageMessage = {
@@ -71,9 +72,10 @@ export function BrowserSettings() {
 					notMatched: '表示中ページが別ドメインのため、そのローカルデータは変更していません。',
 					partialFailure: '表示中ページのローカルデータを完全には削除できませんでした。一部が削除済みの可能性があります。ページを閉じてから再実行してください。',
 				}[result.currentOriginStorageStatus]
-				setMessage(
-					`${result.domain}: Cookie ${result.cookiesDeleted}件を削除しました。${storageMessage}`,
-				)
+				const cookieMessage = result.cookiesFailed > 0
+					? `Cookie ${result.cookiesDeleted}件を削除し、${result.cookiesFailed}件は削除できませんでした。一部が削除済みの可能性があります。`
+					: `Cookie ${result.cookiesDeleted}件を削除しました。`
+				setMessage(`${result.domain}: ${cookieMessage}${storageMessage}`)
 		} catch (error) {
 			setMessage(String(error))
 		} finally {

@@ -238,7 +238,7 @@ const negationWords =
 const utteranceHasNegation = (utterance: string) => negationWords.test(utterance)
 
 const typingWords =
-	/(入力|記入|タイプ|書き込|貼り付け|ペースト|セット|設定|埋め|記載|打ち込|書いて|入れて|\b(?:type|enter|fill|write|paste|set)\b)/i
+	/(入力して|入力する|記入して|記入する|タイプして|タイプする|書き込んで|書き込む|貼り付けて|貼り付ける|ペーストして|ペーストする|打ち込んで|打ち込む|書いて|入れて|\b(?:type|enter|fill|write|paste)\b)/i
 
 const closeWords = /(閉じて|閉じる|終了して|終了する|\bclose\b)/i
 
@@ -489,6 +489,15 @@ export class BrowserToolRunner {
 		} else if (operation === 'close') {
 			explicit = !utteranceHasNegation(this.utterance) && closeWords.test(this.utterance)
 			description = '表示中のJARVIS内ブラウザを閉じます。未保存の入力内容が失われる可能性があります。'
+			detail = this.snapshot?.url
+		} else if (operation === 'back' || operation === 'forward') {
+			explicit = false
+			if (!this.snapshot) {
+				this.snapshot = await this.request<BrowserSnapshot>('snapshot')
+			}
+			description = operation === 'back'
+				? '表示中のJARVIS内ブラウザで前のページへ戻ります。'
+				: '表示中のJARVIS内ブラウザで次のページへ進みます。'
 			detail = this.snapshot?.url
 		} else if (operation === 'click') {
 			const reference = textArg(args, 'reference')

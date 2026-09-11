@@ -24,6 +24,7 @@ pub struct CookieImportResult {
 pub struct SiteDataClearResult {
     domain: String,
     cookies_deleted: usize,
+    cookies_failed: usize,
     current_origin_storage_status: crate::browser::StorageClearStatus,
 }
 
@@ -390,12 +391,15 @@ mod platform {
             .cookies()
             .map_err(|_| "ブラウザのCookieを読み取れませんでした。".to_string())?;
         let mut deleted = 0;
+        let mut failed = 0;
         for cookie in cookies {
             let host = cookie.domain().unwrap_or_default().trim_start_matches('.');
-            if (host == domain || host.ends_with(&format!(".{domain}")))
-                && browser.delete_cookie(cookie).is_ok()
-            {
-                deleted += 1;
+            if host == domain || host.ends_with(&format!(".{domain}")) {
+                if browser.delete_cookie(cookie).is_ok() {
+                    deleted += 1;
+                } else {
+                    failed += 1;
+                }
             }
         }
         let current_origin_storage_status = crate::browser::clear_current_storage(app, &domain)
@@ -404,6 +408,7 @@ mod platform {
         Ok(SiteDataClearResult {
             domain,
             cookies_deleted: deleted,
+            cookies_failed: failed,
             current_origin_storage_status,
         })
     }

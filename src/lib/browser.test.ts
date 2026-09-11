@@ -207,6 +207,25 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
+	it('does not treat a Japanese settings question as typing intent', async () => {
+		const approve = vi.fn(async () => false)
+		const languageSnapshot = {
+			...snapshot,
+			elements: [{ ref: 'e3-language', role: 'textbox', label: '言語' }],
+		}
+		const request = vi.fn(async (operation: string) =>
+			operation === 'snapshot' ? languageSnapshot : { ok: true },
+		) as unknown as typeof browserRequest
+		const runner = new BrowserToolRunner({ sendEvent: () => {} }, request, approve)
+		runner.handle(done('browser_snapshot', {}, 'snapshot-language'))
+		await runner.settled()
+		runner.setUserUtterance('言語設定は日本語ですか？')
+		runner.handle(done('browser_type', { reference: 'e3-language', text: '日本語' }, 'type-language'))
+		await runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(request).toHaveBeenCalledTimes(1)
+	})
+
 	it('allows exactly stated form text and verifies with a fresh snapshot', async () => {
 		const f = fixture()
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot'))
@@ -270,6 +289,36 @@ describe('BrowserToolRunner', () => {
 		await f.runner.settled()
 		expect(f.approve).not.toHaveBeenCalled()
 		expect(f.operations.map(item => item.operation)).toEqual(['close'])
+	})
+
+	it.each([
+		['browser_back', 'back'],
+		['browser_forward', 'forward'],
+	] as const)('always requires approval for %s and shows the current origin', async (tool, operation) => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, `snapshot-${operation}`))
+		await f.runner.settled()
+		f.runner.setUserUtterance(operation === 'back' ? '戻って' : '進んで')
+		f.runner.handle(done(tool, {}, operation))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledWith(expect.objectContaining({
+			operation,
+			detail: snapshot.url,
+		}))
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
+	it('takes a local snapshot before approving history navigation when needed', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_back', {}, 'back-without-snapshot'))
+		await f.runner.settled()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+		expect(approve).toHaveBeenCalledWith(expect.objectContaining({
+			operation: 'back',
+			detail: snapshot.url,
+		}))
 	})
 
 	it('does not authorize query data on a cross-origin link from a hostname mention', async () => {

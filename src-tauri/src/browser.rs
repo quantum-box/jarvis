@@ -788,8 +788,6 @@ mod platform {
         bounds: BrowserBounds,
     ) -> Result<BrowserStatus, String> {
         let browser = webview_by_id(app, &id)?;
-        set_active(&id);
-        raise(&browser)?;
         apply_bounds(app, &id, &browser, constrain_bounds(app, Some(bounds))?)?;
         let status = status_for(&id, Some(browser));
         let _ = app.emit_to("main", STATUS_EVENT, status.clone());
@@ -938,6 +936,57 @@ mod platform {
             .await
             .map_err(|_| "ページの応答がタイムアウトしました。".to_string())?
             .map_err(|_| "ページの応答を受け取れませんでした。".to_string())?;
+        serde_json::from_str(&encoded).map_err(|_| "ページから不正な応答が返されました。".into())
+    }
+
+    async fn eval_isolated(browser: &Webview, script: String) -> Result<Value, String> {
+        use block2::RcBlock;
+        use objc2::{runtime::AnyObject, MainThreadMarker};
+        use objc2_foundation::{NSError, NSString};
+        use objc2_web_kit::{WKContentWorld, WKWebView};
+
+        let script = format!("JSON.stringify({script})");
+        let (send, receive) = oneshot::channel();
+        let send = Arc::new(Mutex::new(Some(send)));
+        browser
+            .with_webview(move |webview| unsafe {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    if let Ok(mut sender) = send.lock() {
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(Err("ページを読み取れませんでした。".to_string()));
+                        }
+                    }
+                    return;
+                };
+                let webview: &WKWebView = &*webview.inner().cast();
+                let content_world = WKContentWorld::defaultClientWorld(mtm);
+                let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                    let result = if !error.is_null() || value.is_null() {
+                        Err("ページを読み取れませんでした。".to_string())
+                    } else {
+                        (&*value)
+                            .downcast_ref::<NSString>()
+                            .map(ToString::to_string)
+                            .ok_or_else(|| "ページから不正な応答が返されました。".to_string())
+                    };
+                    if let Ok(mut sender) = send.lock() {
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(result);
+                        }
+                    }
+                });
+                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                    &NSString::from_str(&script),
+                    None,
+                    &content_world,
+                    Some(&handler),
+                );
+            })
+            .map_err(|_| "ページを読み取れませんでした。".to_string())?;
+        let encoded = tokio::time::timeout(Duration::from_secs(8), receive)
+            .await
+            .map_err(|_| "ページの応答がタイムアウトしました。".to_string())?
+            .map_err(|_| "ページの応答を受け取れませんでした。".to_string())??;
         serde_json::from_str(&encoded).map_err(|_| "ページから不正な応答が返されました。".into())
     }
 
@@ -1101,7 +1150,7 @@ mod platform {
 
     pub async fn snapshot(app: &AppHandle) -> Result<Value, String> {
         let (id, browser) = webview(app)?;
-        let mut snapshot = eval(&browser, SNAPSHOT_SCRIPT.into()).await?;
+        let mut snapshot = eval_isolated(&browser, SNAPSHOT_SCRIPT.into()).await?;
         let scope = NEXT_REFERENCE_SCOPE.fetch_add(1, Ordering::AcqRel);
         update_reference_scope(&id, scope)?;
         let object = snapshot
@@ -1124,7 +1173,7 @@ mod platform {
 
     pub async fn reference_detail(app: &AppHandle, reference: String) -> Result<Value, String> {
         let (_, local_reference, browser) = referenced_webview(app, &reference)?;
-        let result = eval(
+        let result = eval_isolated(
             &browser,
             ref_script(
                 local_reference,
@@ -1142,7 +1191,7 @@ mod platform {
         let (id, local_reference, browser) = referenced_webview(app, &reference)?;
         let previous_url = browser.url().ok().map(|url| url.to_string());
         let load_start = page_load_count(&id);
-        let mut result = eval(
+        let mut result = eval_isolated(
             &browser,
             ref_script(
                 local_reference,
@@ -1219,17 +1268,20 @@ mod platform {
             }}
             el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); state.refs.clear(); return {{ok:true,kind:'type',label:label(el),selectedLabel}};"#
         );
-        let (_, local_reference, browser) = referenced_webview(app, &reference)?;
-        let result = eval(&browser, ref_script(local_reference, &action)).await?;
+        let (id, local_reference, browser) = referenced_webview(app, &reference)?;
+        let previous_url = browser.url().ok().map(|url| url.to_string());
+        let load_start = page_load_count(&id);
+        let result = eval_isolated(&browser, ref_script(local_reference, &action)).await?;
         if result.get("ok") != Some(&Value::Bool(true)) {
             return Err("入力対象が変わったか、編集できません。もう一度確認してください。".into());
         }
+        wait_for_possible_navigation(&id, &browser, load_start, previous_url).await?;
         Ok(result)
     }
 
     pub async fn scroll(app: &AppHandle, delta_y: f64) -> Result<Value, String> {
         let value = delta_y.clamp(-5000.0, 5000.0);
-        eval(
+        eval_isolated(
             &active_webview(app)?,
             format!(r#"(() => {{
               const state = globalThis.__jarvisManagedBrowserV1;
@@ -1272,7 +1324,7 @@ mod platform {
             "history.back()"
         };
         let load_start = page_load_count(&id);
-        let result = eval(
+        let result = eval_isolated(
             &browser,
             format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} {command}; return {{ok:true}}; }})()"),
         )
