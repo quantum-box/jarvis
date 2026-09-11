@@ -19,6 +19,7 @@ import { CoreScene } from "./components/CoreScene";
 import { Settings, loadSettings } from "./components/Settings";
 import { UpdateController } from "./lib/updater";
 import { AppUpdate } from "./components/AppUpdate";
+import { listenForUpdateCheck } from "./lib/app-menu";
 import { Login } from './components/Login';
 import { AuthSession } from './lib/auth';
 import { nativeSessionStore } from './lib/session-store';
@@ -59,6 +60,21 @@ export default function App() {
   const connected = state === "connected";
   const busy = state === "connecting";
   const textInputSupported = normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL;
+  useEffect(() => {
+    let removeListener: (() => void) | undefined;
+    let disposed = false;
+    void listenForUpdateCheck(() => {
+      setShowSettings(true);
+      void updater.check();
+    }).then(unlisten => {
+      if (disposed) unlisten();
+      else removeListener = unlisten;
+    });
+    return () => {
+      disposed = true;
+      removeListener?.();
+    };
+  }, [updater]);
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     const endSession = () => { void client.current?.disconnect(); };

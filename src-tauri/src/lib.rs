@@ -1,5 +1,42 @@
 mod auth_store;
 
+#[cfg(desktop)]
+const CHECK_FOR_UPDATES_MENU_ID: &str = "check-for-updates";
+#[cfg(desktop)]
+const CHECK_FOR_UPDATES_EVENT: &str = "jarvis://check-for-updates";
+
+#[cfg(desktop)]
+fn is_check_for_updates_menu_item(id: &str) -> bool {
+    id == CHECK_FOR_UPDATES_MENU_ID
+}
+
+#[cfg(desktop)]
+fn install_update_menu(app: &tauri::App) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::{
+            menu::{MenuItem, MenuItemKind},
+            Manager,
+        };
+
+        if let Some(menu) = app.menu() {
+            if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.first() {
+                let check_for_updates = MenuItem::with_id(
+                    app,
+                    CHECK_FOR_UPDATES_MENU_ID,
+                    "アップデートを確認…",
+                    true,
+                    None::<&str>,
+                )?;
+                // macOS convention places this immediately below About, before the separator.
+                app_menu.insert(&check_for_updates, 1)?;
+                app.manage(check_for_updates);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn update_availability(app: tauri::AppHandle) -> &'static str {
     if cfg!(mobile) {
@@ -13,8 +50,26 @@ fn update_availability(app: tauri::AppHandle) -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_http::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_http::init());
+
+    #[cfg(desktop)]
+    let builder = builder
+        .menu(tauri::menu::Menu::default)
+        .on_menu_event(|app, event| {
+            use tauri::{Emitter, Manager};
+
+            if !is_check_for_updates_menu_item(event.id().as_ref()) {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit(CHECK_FOR_UPDATES_EVENT, ());
+        });
+
+    builder
         .invoke_handler(tauri::generate_handler![
             update_availability,
             auth_store::load_auth_session,
@@ -24,6 +79,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
+                install_update_menu(app)?;
                 app.handle().plugin(tauri_plugin_process::init())?;
                 if app.config().plugins.0.contains_key("updater") {
                     app.handle()
@@ -35,4 +91,15 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
+}
+
+#[cfg(all(test, desktop))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_only_the_update_menu_item() {
+        assert!(is_check_for_updates_menu_item("check-for-updates"));
+        assert!(!is_check_for_updates_menu_item("quit"));
+    }
 }
