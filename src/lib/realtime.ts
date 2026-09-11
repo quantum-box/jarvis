@@ -708,6 +708,18 @@ export class Realtime {
 		dataChannel.send(JSON.stringify({ type: 'response.create' }))
 	}
 
+	/** Send a local client event through the active Realtime data channel. */
+	sendEvent(event: RealtimeEvent) {
+		const dataChannel = this.transport.dataChannel
+		if (!dataChannel || dataChannel.readyState !== 'open') {
+			throw new RealtimeError('Realtime data channel is not open', {
+				code: 'data_channel_not_open',
+				recoverable: true,
+			})
+		}
+		dataChannel.send(JSON.stringify(event))
+	}
+
 	/** Send a session.update through Tachyon's backend sideband channel. */
 	async updateSession(update: RealtimeSessionUpdate): Promise<void> {
 		if (!this.currentCallId) {
@@ -1314,6 +1326,7 @@ export interface RealtimeClientCallbacks {
 	onActivityChange?: (activity: AssistantActivity) => void
 	onError?: (message: string, error?: RealtimeError) => void
 	onTranscript?: (item: TranscriptItem) => void
+	onEvent?: (event: RealtimeEvent) => void
 }
 
 export type AssistantActivity =
@@ -1379,6 +1392,7 @@ export class RealtimeClient {
 					this.resetActivityAndLevels()
 				},
 				event: event => {
+					this.callbacks.onEvent?.(event)
 					this.updateEventLevel(event)
 				},
 				track: stream => {
@@ -1433,6 +1447,16 @@ export class RealtimeClient {
 			})
 		}
 		this.realtime.sendText(text)
+	}
+
+	sendEvent(event: RealtimeEvent) {
+		if (!this.realtime) {
+			throw new RealtimeError('Realtime is not connected', {
+				code: 'not_connected',
+				recoverable: true,
+			})
+		}
+		this.realtime.sendEvent(event)
 	}
 
 	getState() {
