@@ -24,7 +24,7 @@ pub struct CookieImportResult {
 pub struct SiteDataClearResult {
     domain: String,
     cookies_deleted: usize,
-    current_origin_storage_cleared: bool,
+    current_origin_storage_status: crate::browser::StorageClearStatus,
 }
 
 #[cfg(target_os = "macos")]
@@ -435,13 +435,13 @@ mod platform {
                 deleted += 1;
             }
         }
-        let current_origin_storage_cleared = crate::browser::clear_current_storage(app, &domain)
+        let current_origin_storage_status = crate::browser::clear_current_storage(app, &domain)
             .await
-            .unwrap_or(false);
+            .unwrap_or(crate::browser::StorageClearStatus::PartialFailure);
         Ok(SiteDataClearResult {
             domain,
             cookies_deleted: deleted,
-            current_origin_storage_cleared,
+            current_origin_storage_status,
         })
     }
 }

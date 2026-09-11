@@ -24,6 +24,15 @@ pub struct BrowserStatus {
     opacity: f64,
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum StorageClearStatus {
+    NotMatched,
+    Cleared,
+    PartialFailure,
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
@@ -41,6 +50,7 @@ mod platform {
     use tokio::sync::oneshot;
 
     const LABEL_PREFIX: &str = "managed-browser";
+    const COOKIE_HELPER_LABEL: &str = "managed-browser-cookie-store";
     const STATUS_EVENT: &str = "managed-browser-status";
     const DEFAULT_URL: &str = "https://www.google.com/";
     const BLANK_URL: &str = "about:blank";
@@ -54,6 +64,7 @@ mod platform {
     const MIN_WEBVIEW_OPACITY: f64 = 0.35;
     static BROWSER_CONTENT_VISIBLE: AtomicBool = AtomicBool::new(true);
     static NEXT_BROWSER_ID: AtomicU64 = AtomicU64::new(1);
+    static NEXT_REFERENCE_SCOPE: AtomicU64 = AtomicU64::new(1);
     static ACTIVE_BROWSER: Mutex<Option<String>> = Mutex::new(None);
     static BROWSER_OPACITY: Mutex<f64> = Mutex::new(DEFAULT_WEBVIEW_OPACITY);
     static BROWSERS: OnceLock<Mutex<HashMap<String, BrowserMeta>>> = OnceLock::new();
@@ -67,10 +78,22 @@ mod platform {
         opacity: f64,
         finished_page_loads: u64,
         finished_page_url: String,
+        reference_scope: u64,
     }
 
     fn browsers() -> &'static Mutex<HashMap<String, BrowserMeta>> {
         BROWSERS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn browser_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "ブラウザ保存先を作成できませんでした。".to_string())?
+            .join("managed-browser");
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|_| "ブラウザ保存先を作成できませんでした。".to_string())?;
+        Ok(data_dir)
     }
 
     fn configured_opacity() -> f64 {
@@ -288,13 +311,7 @@ mod platform {
         visible: bool,
         bounds: Option<BrowserBounds>,
     ) -> Result<(String, Webview), String> {
-        let data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|_| "ブラウザ保存先を作成できませんでした。".to_string())?
-            .join("managed-browser");
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|_| "ブラウザ保存先を作成できませんでした。".to_string())?;
+        let data_dir = browser_data_dir(app)?;
 
         let order = NEXT_BROWSER_ID.fetch_add(1, Ordering::AcqRel);
         let id = format!("{LABEL_PREFIX}-{order}");
@@ -353,6 +370,7 @@ mod platform {
                     opacity,
                     finished_page_loads: 0,
                     finished_page_url: String::new(),
+                    reference_scope: 0,
                 },
             );
         }
@@ -382,6 +400,31 @@ mod platform {
         Ok((id, browser))
     }
 
+    fn cookie_store_webview(app: &AppHandle) -> Result<Webview, String> {
+        if let Some(browser) = app.get_webview(COOKIE_HELPER_LABEL) {
+            return Ok(browser);
+        }
+        let builder = WebviewBuilder::new(COOKIE_HELPER_LABEL, WebviewUrl::External(blank_url()?))
+            .data_directory(browser_data_dir(app)?)
+            .on_navigation(is_blank_url)
+            .on_new_window(|_, _| NewWindowResponse::Deny)
+            .on_download(|_, _| false);
+        let parent = app
+            .get_window("main")
+            .ok_or_else(|| "JARVISのメイン画面が見つかりませんでした。".to_string())?;
+        let browser = parent
+            .add_child(
+                builder,
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(1.0, 1.0),
+            )
+            .map_err(|_| "Cookie保存領域を準備できませんでした。".to_string())?;
+        browser
+            .hide()
+            .map_err(|_| "Cookie保存領域を非表示にできませんでした。".to_string())?;
+        Ok(browser)
+    }
+
     pub fn ensure_webview(app: &AppHandle, visible: bool) -> Result<Webview, String> {
         if let Ok((id, browser)) = webview(app) {
             if visible {
@@ -398,7 +441,11 @@ mod platform {
             }
             return Ok(browser);
         }
-        create_webview(app, blank_url()?, visible, None).map(|(_, browser)| browser)
+        if visible {
+            create_webview(app, blank_url()?, true, None).map(|(_, browser)| browser)
+        } else {
+            cookie_store_webview(app)
+        }
     }
 
     async fn wait_for_page_load(id: &str, browser: &Webview, start: u64) -> Result<(), String> {
@@ -579,6 +626,7 @@ mod platform {
         let id = requested_id
             .or_else(active_id)
             .ok_or_else(|| "ブラウザを先に開いてください。".to_string())?;
+        let was_active = active_id().as_deref() == Some(id.as_str());
         webview_by_id(app, &id)?
             .close()
             .map_err(|_| "ブラウザを閉じられませんでした。".to_string())?;
@@ -591,8 +639,12 @@ mod platform {
         } else {
             None
         };
-        if let Ok(mut active) = ACTIVE_BROWSER.lock() {
-            *active = next_active;
+        if was_active {
+            if let Ok(mut active) = ACTIVE_BROWSER.lock() {
+                if active.as_deref() == Some(id.as_str()) {
+                    *active = next_active;
+                }
+            }
         }
         let status = BrowserStatus {
             id,
@@ -808,11 +860,19 @@ mod platform {
       const state = { revision: (previous?.revision || 0) + 1, refs: new Map(), observer: null };
       globalThis[key] = state;
       const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const styleVisible = el => {
+        for (let current = el; current; current = current.parentElement) {
+          const style = getComputedStyle(current);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+        }
+        return true;
+      };
       const visible = el => {
-        const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+        const rect = el.getBoundingClientRect();
+        return styleVisible(el) && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
       };
       const visibleText = node => {
+        if (!styleVisible(node.parentElement)) return false;
         const range = document.createRange(); range.selectNodeContents(node);
         return [...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth);
       };
@@ -829,12 +889,13 @@ mod platform {
         }
       };
       const fingerprint = el => JSON.stringify({tag:el.tagName,role:role(el),label:label(el),type:el.getAttribute('type') || '',href:el.href || ''});
+      const options = el => el instanceof HTMLSelectElement ? [...el.options].filter(option => !option.disabled && !option.closest('optgroup[disabled]')).map(option => clean(option.textContent)).filter(Boolean).slice(0, 100) : undefined;
       const candidates = [...document.querySelectorAll('a[href],button,input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],[tabindex]')]
         .filter(visible).slice(0, 80);
       const elements = candidates.map((el, index) => {
         const ref = `e${state.revision}-${index + 1}`; const fp = fingerprint(el);
         state.refs.set(ref, {el, fingerprint:fp, url:location.href, origin:location.origin, revision:state.revision, href:el.href || null});
-        return {ref, role:role(el), label:label(el), type:el.getAttribute('type') || undefined, ...link(el)};
+        return {ref, role:role(el), label:label(el), type:el.getAttribute('type') || undefined, options:options(el), ...link(el)};
       });
       const excluded = el => el?.closest?.('script,style,noscript,input,textarea,select,[contenteditable="true"],[aria-hidden="true"]');
       const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
@@ -870,25 +931,133 @@ mod platform {
               const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
               const label = el => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || (valueControl(el) ? '' : el.innerText)).slice(0,180);
               const fingerprint = el => JSON.stringify({{tag:el.tagName,role:role(el),label:label(el),type:el.getAttribute('type') || '',href:el.href || ''}});
-              const visible = el => {{ const style = getComputedStyle(el); const rect = el.getBoundingClientRect(); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth; }};
-              if (!entry.el?.isConnected || !visible(entry.el) || fingerprint(entry.el) !== entry.fingerprint) return {{ok:false,error:'stale_reference'}};
+              const styleVisible = el => {{
+                for (let current = el; current; current = current.parentElement) {{
+                  const style = getComputedStyle(current);
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0 || style.pointerEvents === 'none') return false;
+                }}
+                return true;
+              }};
+              const visible = el => {{ const rect = el.getBoundingClientRect(); return styleVisible(el) && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth; }};
+              const hitTestable = el => {{
+                if (el.matches(':disabled,[aria-disabled="true" i]') || el.closest('[inert]')) return false;
+                const rect = el.getBoundingClientRect();
+                const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+                const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+                for (const xRatio of [0.25, 0.5, 0.75]) for (const yRatio of [0.25, 0.5, 0.75]) {{
+                  const hit = document.elementFromPoint(left + (right - left) * xRatio, top + (bottom - top) * yRatio);
+                  if (hit === el || el.contains(hit)) return true;
+                }}
+                return false;
+              }};
+              if (!entry.el?.isConnected || !visible(entry.el) || !hitTestable(entry.el) || fingerprint(entry.el) !== entry.fingerprint) return {{ok:false,error:'stale_reference'}};
               {action}
             }})()"#
         )
     }
 
+    fn referenced_webview(
+        app: &AppHandle,
+        reference: &str,
+    ) -> Result<(String, String, Webview), String> {
+        let mut parts = reference.splitn(3, "::");
+        let id = parts.next().unwrap_or_default();
+        let scope = parts
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        let local_reference = parts.next().unwrap_or_default();
+        let valid_reference = id.starts_with(&format!("{LABEL_PREFIX}-"))
+            && scope > 0
+            && !local_reference.is_empty()
+            && browsers()
+                .lock()
+                .ok()
+                .and_then(|browsers| browsers.get(id).map(|meta| meta.reference_scope == scope))
+                .unwrap_or(false);
+        if !valid_reference {
+            return Err("対象のブラウザ参照が正しくありません。".to_string());
+        }
+        if active_id().as_deref() != Some(id) {
+            return Err(
+                "対象のブラウザが切り替わりました。もう一度ページを確認してください。".into(),
+            );
+        }
+        Ok((
+            id.to_string(),
+            local_reference.to_string(),
+            webview_by_id(app, id)?,
+        ))
+    }
+
+    fn scoped_reference(id: &str, scope: u64, local_reference: &str) -> String {
+        format!("{id}::{scope}::{local_reference}")
+    }
+
+    fn update_reference_scope(id: &str, scope: u64) -> Result<(), String> {
+        let updated = browsers()
+            .lock()
+            .ok()
+            .and_then(|mut browsers| {
+                browsers
+                    .get_mut(id)
+                    .map(|meta| meta.reference_scope = scope)
+            })
+            .is_some();
+        if updated {
+            Ok(())
+        } else {
+            Err("対象のブラウザが見つかりませんでした。".to_string())
+        }
+    }
+
     pub async fn snapshot(app: &AppHandle) -> Result<Value, String> {
-        eval(&active_webview(app)?, SNAPSHOT_SCRIPT.into()).await
+        let (id, browser) = webview(app)?;
+        let mut snapshot = eval(&browser, SNAPSHOT_SCRIPT.into()).await?;
+        let scope = NEXT_REFERENCE_SCOPE.fetch_add(1, Ordering::AcqRel);
+        update_reference_scope(&id, scope)?;
+        let object = snapshot
+            .as_object_mut()
+            .ok_or_else(|| "ページから不正な応答が返されました。".to_string())?;
+        object.insert("browserId".into(), Value::String(id.clone()));
+        if let Some(elements) = object.get_mut("elements").and_then(Value::as_array_mut) {
+            for element in elements {
+                if let Some(reference) = element
+                    .get("ref")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    element["ref"] = Value::String(scoped_reference(&id, scope, &reference));
+                }
+            }
+        }
+        Ok(snapshot)
+    }
+
+    pub async fn reference_detail(app: &AppHandle, reference: String) -> Result<Value, String> {
+        let (_, local_reference, browser) = referenced_webview(app, &reference)?;
+        let result = eval(
+            &browser,
+            ref_script(
+                local_reference,
+                "return {ok:true,href:entry.href || null,label:label(entry.el)};",
+            ),
+        )
+        .await?;
+        if result.get("ok") != Some(&Value::Bool(true)) {
+            return Err("対象が変わりました。もう一度ページを確認してください。".into());
+        }
+        Ok(result)
     }
 
     pub async fn click(app: &AppHandle, reference: String) -> Result<Value, String> {
-        let (id, browser) = webview(app)?;
+        let (id, local_reference, browser) = referenced_webview(app, &reference)?;
         let previous_url = browser.url().ok().map(|url| url.to_string());
         let load_start = page_load_count(&id);
         let mut result = eval(
             &browser,
             ref_script(
-                reference,
+                local_reference,
                 "if (entry.href) return {ok:true,kind:'navigate',href:entry.href,label:label(entry.el)}; entry.el.focus(); entry.el.click(); state.refs.clear(); return {ok:true,kind:'click',label:label(entry.el)};",
             ),
         )
@@ -947,13 +1116,21 @@ mod platform {
             const textInput = el.isContentEditable || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(el.type));
             if (!textInput || el.matches(':disabled') || (!el.isContentEditable && Boolean(el.readOnly))) return {{ok:false,error:'not_editable'}};
             el.focus();
-            if (el.isContentEditable) {{ el.textContent = value; }} else {{
-              const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+            let selectedLabel = null;
+            if (el instanceof HTMLSelectElement) {{
+              const matching = [...el.options].filter(option => !option.disabled && !option.closest('optgroup[disabled]') && clean(option.textContent) === clean(value));
+              if (matching.length !== 1) return {{ok:false,error:'unknown_or_ambiguous_option'}};
+              const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+              if (!setter) return {{ok:false,error:'not_editable'}};
+              setter.call(el, matching[0].value); selectedLabel = clean(matching[0].textContent);
+            }} else if (el.isContentEditable) {{ el.textContent = value; }} else {{
+              const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
               const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set; if (!setter) return {{ok:false,error:'not_editable'}}; setter.call(el, value);
             }}
-            el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); state.refs.clear(); return {{ok:true,kind:'type',label:label(el)}};"#
+            el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); state.refs.clear(); return {{ok:true,kind:'type',label:label(el),selectedLabel}};"#
         );
-        let result = eval(&active_webview(app)?, ref_script(reference, &action)).await?;
+        let (_, local_reference, browser) = referenced_webview(app, &reference)?;
+        let result = eval(&browser, ref_script(local_reference, &action)).await?;
         if result.get("ok") != Some(&Value::Bool(true)) {
             return Err("入力対象が変わったか、編集できません。もう一度確認してください。".into());
         }
@@ -964,7 +1141,34 @@ mod platform {
         let value = delta_y.clamp(-5000.0, 5000.0);
         eval(
             &active_webview(app)?,
-            format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} window.scrollBy({{top:{value},behavior:'auto'}}); return {{ok:true,origin:location.origin,scrollY:window.scrollY}}; }})()"),
+            format!(r#"(() => {{
+              const state = globalThis.__jarvisManagedBrowserV1;
+              if (state) {{ state.revision += 1; state.refs.clear(); }}
+              const canScroll = el => {{
+                if (!el || el.scrollHeight <= el.clientHeight + 1) return false;
+                if (el === document.scrollingElement) return true;
+                const style = getComputedStyle(el);
+                return (style.overflowY === 'auto' || style.overflowY === 'scroll') && style.display !== 'none' && style.visibility !== 'hidden';
+              }};
+              let target = document.activeElement;
+              while (target && !canScroll(target)) target = target.parentElement;
+              if (!target) {{
+                let best = null, bestArea = -1, inspected = 0;
+                for (const candidate of document.querySelectorAll('*')) {{
+                  if (++inspected > 10000) break;
+                  if (!canScroll(candidate)) continue;
+                  const rect = candidate.getBoundingClientRect();
+                  const width = Math.max(0, Math.min(innerWidth, rect.right) - Math.max(0, rect.left));
+                  const height = Math.max(0, Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top));
+                  const area = width * height;
+                  if (area > bestArea) {{ best = candidate; bestArea = area; }}
+                }}
+                target = best || document.scrollingElement;
+              }}
+              if (!target) return {{ok:false,error:'no_scroll_container'}};
+              target.scrollBy({{top:{value},behavior:'auto'}});
+              return {{ok:true,origin:location.origin,scrollTop:target.scrollTop}};
+            }})()"#),
         )
         .await
     }
@@ -987,35 +1191,59 @@ mod platform {
         Ok(result)
     }
 
-    pub async fn clear_current_storage(app: &AppHandle, domain: &str) -> Result<bool, String> {
-        let browser = active_webview(app)?;
+    pub async fn clear_current_storage(
+        app: &AppHandle,
+        domain: &str,
+    ) -> Result<StorageClearStatus, String> {
+        let Ok(browser) = active_webview(app) else {
+            return Ok(StorageClearStatus::NotMatched);
+        };
         let current = browser
             .url()
             .map_err(|_| "現在のページを確認できませんでした。".to_string())?;
         let host = current.host_str().unwrap_or_default();
         if host != domain && !host.ends_with(&format!(".{domain}")) {
-            return Ok(false);
+            return Ok(StorageClearStatus::NotMatched);
         }
         let result = eval(
             &browser,
             r#"(async () => {
-              localStorage.clear();
-              sessionStorage.clear();
-              if (globalThis.caches) await Promise.all((await caches.keys()).map(key => caches.delete(key)));
-              if (navigator.serviceWorker?.getRegistrations) {
-                await Promise.all((await navigator.serviceWorker.getRegistrations()).map(registration => registration.unregister()));
-              }
-              if (!indexedDB.databases) return true;
-              const results = await Promise.all((await indexedDB.databases()).filter(db => db.name).map(db => new Promise(resolve => {
-                const request = indexedDB.deleteDatabase(db.name);
-                request.onsuccess = () => resolve(true);
-                request.onerror = () => resolve(false);
-                request.onblocked = () => resolve(false);
-              })));
-              return results.every(Boolean);
+              const failures = [];
+              try { localStorage.clear(); } catch { failures.push('localStorage'); }
+              try { sessionStorage.clear(); } catch { failures.push('sessionStorage'); }
+              try {
+                if (globalThis.caches) {
+                  const results = await Promise.all((await caches.keys()).map(key => caches.delete(key)));
+                  if (!results.every(Boolean)) failures.push('caches');
+                }
+              } catch { failures.push('caches'); }
+              try {
+                if (navigator.serviceWorker?.getRegistrations) {
+                  const results = await Promise.all((await navigator.serviceWorker.getRegistrations()).map(registration => registration.unregister()));
+                  if (!results.every(Boolean)) failures.push('serviceWorkers');
+                }
+              } catch { failures.push('serviceWorkers'); }
+              try {
+                if (!indexedDB.databases) {
+                  failures.push('indexedDB');
+                } else {
+                  const results = await Promise.all((await indexedDB.databases()).filter(db => db.name).map(db => new Promise(resolve => {
+                    const request = indexedDB.deleteDatabase(db.name);
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => resolve(false);
+                    request.onblocked = () => resolve(false);
+                  })));
+                  if (!results.every(Boolean)) failures.push('indexedDB');
+                }
+              } catch { failures.push('indexedDB'); }
+              return {ok: failures.length === 0};
             })()"#.into(),
         ).await?;
-        Ok(result == Value::Bool(true))
+        Ok(if result.get("ok") == Some(&Value::Bool(true)) {
+            StorageClearStatus::Cleared
+        } else {
+            StorageClearStatus::PartialFailure
+        })
     }
 
     #[allow(dead_code)]
@@ -1176,6 +1404,17 @@ pub async fn browser_snapshot(app: AppHandle) -> Result<Value, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_reference_detail(app: AppHandle, reference: String) -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    return platform::reference_detail(&app, reference).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, reference);
         Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }

@@ -61,18 +61,19 @@ export function BrowserSettings() {
 		setBusy(true)
 		setMessage('')
 		try {
-			const result = await invoke<{
-				domain: string
-				cookiesDeleted: number
-				currentOriginStorageCleared: boolean
-			}>('clear_browser_site_data', { domain: domain.trim() })
-			setMessage(
-				`${result.domain}: Cookie ${result.cookiesDeleted}件を削除しました。${
-					result.currentOriginStorageCleared
-						? '表示中ページのローカルデータも削除しました。'
-						: '表示中ページが別ドメインのため、そのローカルデータは変更していません。'
-				}`,
-			)
+				const result = await invoke<{
+					domain: string
+					cookiesDeleted: number
+					currentOriginStorageStatus: 'notMatched' | 'cleared' | 'partialFailure'
+				}>('clear_browser_site_data', { domain: domain.trim() })
+				const storageMessage = {
+					cleared: '表示中ページのローカルデータも削除しました。',
+					notMatched: '表示中ページが別ドメインのため、そのローカルデータは変更していません。',
+					partialFailure: '表示中ページのローカルデータを完全には削除できませんでした。一部が削除済みの可能性があります。ページを閉じてから再実行してください。',
+				}[result.currentOriginStorageStatus]
+				setMessage(
+					`${result.domain}: Cookie ${result.cookiesDeleted}件を削除しました。${storageMessage}`,
+				)
 		} catch (error) {
 			setMessage(String(error))
 		} finally {

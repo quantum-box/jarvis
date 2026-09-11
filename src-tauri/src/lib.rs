@@ -89,6 +89,7 @@ pub fn run() {
             browser::browser_set_content_visible,
             browser::browser_close,
             browser::browser_snapshot,
+            browser::browser_reference_detail,
             browser::browser_click,
             browser::browser_type,
             browser::browser_scroll,

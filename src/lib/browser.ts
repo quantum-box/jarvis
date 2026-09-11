@@ -24,11 +24,13 @@ export interface BrowserElement {
 	role: string
 	label: string
 	type?: string
+	options?: string[]
 	hrefOrigin?: string
 	hrefHasPayload?: boolean
 }
 
 export interface BrowserSnapshot {
+	browserId: string
 	title: string
 	url: string
 	origin: string
@@ -47,6 +49,12 @@ export interface BrowserApprovalRequest {
 export type BrowserApprovalHandler = (
 	request: BrowserApprovalRequest,
 ) => Promise<boolean>
+
+type BrowserReferenceDetail = {
+	ok: boolean
+	href: string | null
+	label: string
+}
 
 export const isMacDesktopEnvironment = (
 	platform: string,
@@ -224,10 +232,16 @@ const utteranceNamesHostname = (utterance: string, hostname: string) => {
 	return new RegExp(`(^|[^a-z0-9.-])${escapeRegExp(needle)}([^a-z0-9.-]|$)`, 'i').test(haystack)
 }
 
+const negationWords =
+	/(しないでください?|しない|しません|しなくて|するな|せず|ずに|ないでください?|やめ(?:て|る)?|禁止|不要|\b(?:don't|do\s+not|never|not)\b)/i
+
+const utteranceHasNegation = (utterance: string) => negationWords.test(utterance)
+
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
 		return (
+			!utteranceHasNegation(utterance) &&
 			url.pathname === '/' &&
 			!url.search &&
 			!url.hash &&
@@ -444,6 +458,7 @@ export class BrowserToolRunner {
 		let description = ''
 		let detail: string | undefined
 		let explicit = true
+		let gatedLinkReference: string | undefined
 		if (operation === 'open' && typeof args.url === 'string') {
 			const url = args.url
 			explicit = explicitlyNamesPlainDestination(this.utterance, url)
@@ -459,19 +474,23 @@ export class BrowserToolRunner {
 			const value = stringArg(args, 'text')
 			explicit = Boolean(
 				element?.label &&
+					!utteranceHasNegation(this.utterance) &&
 					utteranceContains(this.utterance, element.label) &&
 					utteranceContains(this.utterance, value),
 			)
 			description = `${element?.label || 'フォーム'}へ文字を入力します。入力により自動保存・送信される可能性があります。`
 			detail = value.length > 120 ? `${value.slice(0, 120)}…` : value
 		} else if (operation === 'click') {
-			const element = this.element(textArg(args, 'reference'))
+			const reference = textArg(args, 'reference')
+			const element = this.element(reference)
 			if (element?.hrefOrigin) {
+				gatedLinkReference = reference
 				const sameOrigin = this.snapshot
 					? element.hrefOrigin === this.snapshot.origin
 					: false
 				const consequential = consequentialWords.test(element.label)
 				explicit =
+					!utteranceHasNegation(this.utterance) &&
 					!consequential &&
 					!element.hrefHasPayload &&
 					(sameOrigin ||
@@ -489,6 +508,16 @@ export class BrowserToolRunner {
 				description = `${label}を実行します。ページのeventを発火する操作です。`
 				detail = this.snapshot?.url
 			}
+		}
+		if (!explicit && gatedLinkReference) {
+			const referenceDetail = await this.request<BrowserReferenceDetail>(
+				'reference_detail',
+				{ reference: gatedLinkReference },
+			)
+			if (!referenceDetail.ok || typeof referenceDetail.href !== 'string') {
+				throw new Error('リンク先を確認できませんでした。')
+			}
+			detail = referenceDetail.href
 		}
 		if (explicit) return true
 		const approved = await this.approve({

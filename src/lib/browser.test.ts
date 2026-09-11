@@ -9,6 +9,7 @@ import {
 import type { RealtimeEvent } from './realtime'
 
 const snapshot: BrowserSnapshot = {
+	browserId: 'managed-browser-1',
 	title: 'Fixture',
 	url: 'https://example.com/account',
 	origin: 'https://example.com',
@@ -58,6 +59,9 @@ function fixture(approve = vi.fn(async () => false)) {
 	const request = vi.fn(async (operation: string, args: Record<string, unknown> = {}) => {
 		operations.push({ operation, args })
 		if (operation === 'snapshot') return snapshot
+		if (operation === 'reference_detail') {
+			return { ok: true, href: 'https://example.com/help', label: 'ヘルプ' }
+		}
 		return { ok: true }
 	}) as unknown as typeof browserRequest
 	const runner = new BrowserToolRunner({ sendEvent: event => events.push(event) }, request, approve)
@@ -96,7 +100,32 @@ describe('BrowserToolRunner', () => {
 		f.runner.handle(done('browser_click', { reference: 'e3-1' }, 'click'))
 		await f.runner.settled()
 		expect(f.approve).toHaveBeenCalledOnce()
-		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'reference_detail'])
+	})
+
+	it('shows the exact gated link target only in local approval', async () => {
+		const exactHref = 'https://example.com/delete-account?token=secret'
+		const approve = vi.fn(async () => false)
+		const operations: Array<{ operation: string; args: Record<string, unknown> }> = []
+		const request = vi.fn(async (operation: string, args: Record<string, unknown> = {}) => {
+			operations.push({ operation, args })
+			if (operation === 'snapshot') return snapshot
+			if (operation === 'reference_detail') {
+				return { ok: true, href: exactHref, label: 'ヘルプ' }
+			}
+			return { ok: true }
+		}) as unknown as typeof browserRequest
+		const events: RealtimeEvent[] = []
+		const runner = new BrowserToolRunner({ sendEvent: event => events.push(event) }, request, approve)
+		runner.handle(done('browser_snapshot', {}, 'snapshot-before-link-detail'))
+		await runner.settled()
+		runner.handle(done('browser_click', { reference: 'e3-1' }, 'gated-link-detail'))
+		await runner.settled()
+		expect(approve).toHaveBeenCalledWith(
+			expect.objectContaining({ operation: 'click', detail: exactHref }),
+		)
+		expect(operations.map(item => item.operation)).toEqual(['snapshot', 'reference_detail'])
+		expect(JSON.stringify(events)).not.toContain(exactHref)
 	})
 
 	it('requires approval for a consequential same-origin root link', async () => {
@@ -105,14 +134,20 @@ describe('BrowserToolRunner', () => {
 			...snapshot,
 			elements: [{ ref: 'e3-risk', role: 'link', label: 'アカウントを削除', hrefOrigin: snapshot.origin, hrefHasPayload: false }],
 		}
-		const request = vi.fn(async (operation: string) => operation === 'snapshot' ? risky : { ok: true }) as unknown as typeof browserRequest
+		const request = vi.fn(async (operation: string) => {
+			if (operation === 'snapshot') return risky
+			if (operation === 'reference_detail') {
+				return { ok: true, href: 'https://example.com/delete-account', label: 'アカウントを削除' }
+			}
+			return { ok: true }
+		}) as unknown as typeof browserRequest
 		const runner = new BrowserToolRunner({ sendEvent: () => {} }, request, approve)
 		runner.handle(done('browser_snapshot', {}, 'snapshot-risky-link'))
 		await runner.settled()
 		runner.handle(done('browser_click', { reference: 'e3-risk' }, 'risky-link'))
 		await runner.settled()
 		expect(approve).toHaveBeenCalledOnce()
-		expect(request).toHaveBeenCalledTimes(1)
+		expect(request).toHaveBeenCalledTimes(2)
 	})
 
 	it('does not match a destination hostname inside a longer hostname', async () => {
@@ -145,6 +180,18 @@ describe('BrowserToolRunner', () => {
 		f.runner.handle(done('browser_click', { reference: 'e3-2' }, 'wrong-delete'))
 		await f.runner.settled()
 		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
+	it('requires approval for a negated form input mention', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-negated-type'))
+		await f.runner.settled()
+		f.runner.setUserUtterance('検索欄に秘密を入力しないで')
+		f.runner.handle(done('browser_type', { reference: 'e3-3', text: '秘密' }, 'negated-type'))
+		await f.runner.settled()
+		expect(f.approve).toHaveBeenCalledOnce()
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
@@ -208,9 +255,13 @@ describe('BrowserToolRunner', () => {
 				},
 			],
 		}
-		const request = vi.fn(async (operation: string) =>
-			operation === 'snapshot' ? withQuery : { ok: true },
-		) as unknown as typeof browserRequest
+		const request = vi.fn(async (operation: string) => {
+			if (operation === 'snapshot') return withQuery
+			if (operation === 'reference_detail') {
+				return { ok: true, href: 'https://example.net/account?token=secret', label: '外部サイト' }
+			}
+			return { ok: true }
+		}) as unknown as typeof browserRequest
 		const runner = new BrowserToolRunner(
 			{ sendEvent: () => {} },
 			request,
@@ -222,7 +273,7 @@ describe('BrowserToolRunner', () => {
 		runner.handle(done('browser_click', { reference: 'e3-4' }, 'click-query'))
 		await runner.settled()
 		expect(approve).toHaveBeenCalledOnce()
-		expect(request).toHaveBeenCalledTimes(1)
+		expect(request).toHaveBeenCalledTimes(2)
 	})
 
 	it('cancels a pending authorization when the user starts speaking', async () => {
