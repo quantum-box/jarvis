@@ -24,6 +24,7 @@ import { AuthSession } from './lib/auth';
 import { nativeSessionStore } from './lib/session-store';
 import { apiOrigin, createChatroom, establishTachyonIdentity, userTokenFetch, type TachyonIdentity } from './lib/tachyon';
 import {
+  DEFAULT_REALTIME_MODEL,
   RealtimeClient,
   type RealtimeState,
   type AssistantActivity,
@@ -56,6 +57,7 @@ export default function App() {
   const messageEnd = useRef<HTMLDivElement>(null);
   const connected = state === "connected";
   const busy = state === "connecting";
+  const textInputSupported = settings.model !== DEFAULT_REALTIME_MODEL;
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     const endSession = () => { void client.current?.disconnect(); };
@@ -300,7 +302,7 @@ export default function App() {
               aria-label="使い方"
               onClick={() =>
                 setError(
-                  "Tachyonにログインし、接続設定でテナントを選んで「会話をはじめる」を押してください。チャットルームは自動作成されます。接続中はマイクのミュートとテキスト入力が使えます。",
+                  "Tachyonにログインし、接続設定でテナントを選んで「会話をはじめる」を押してください。チャットルームは自動作成されます。GPT Liveでは音声入力とマイクのミュートが使えます。",
                 )
               }
             >
@@ -376,6 +378,7 @@ export default function App() {
                       className="prompt"
                       key={p}
                       onClick={() => setDraft(p)}
+                      disabled={!textInputSupported}
                     >
                       {p}
                       <ChevronRight size={14} />
@@ -398,12 +401,16 @@ export default function App() {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder={
-                connected ? "メッセージを入力…" : "接続後に送信できます"
+                connected
+                  ? textInputSupported
+                    ? "メッセージを入力…"
+                    : "GPT Liveでは音声で話してください"
+                  : "接続後に送信できます"
               }
             />
             <button
               aria-label="メッセージを送信"
-              disabled={!connected || !draft.trim()}
+              disabled={!connected || !textInputSupported || !draft.trim()}
             >
               <ArrowUp size={16} />
             </button>

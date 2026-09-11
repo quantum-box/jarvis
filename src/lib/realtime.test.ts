@@ -43,6 +43,7 @@ const settings: RealtimeSettings = {
 	token: 'token_test',
 	chatroomId: 'chatroom_test',
 	model: 'gpt-realtime-2.1',
+	backendModel: 'gpt-5.6-terra',
 	voice: 'marin',
 	instructions: 'You are JARVIS.',
 }
@@ -103,7 +104,6 @@ afterEach(() => {
 
 describe('Realtime', () => {
 	it.each([
-		['', 'gpt-realtime-2.1'],
 		['gpt-realtime-2.1', 'gpt-realtime-2.1'],
 		['gpt-realtime-2', 'gpt-realtime-2'],
 	])('sends model %s as %s in the call request', async (model, expected) => {
@@ -122,6 +122,111 @@ describe('Realtime', () => {
 		} finally {
 			await client.stop()
 		}
+	})
+
+	it('creates a GPT Live session with Responses delegation and waits for session.started', async () => {
+		const transport = makeTransport()
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+			new Response(JSON.stringify({
+				session: { id: 'live_test' },
+				transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+			}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+		)
+		const client = new Realtime(
+			{ ...settings, model: 'gpt-live-1' },
+			{},
+			{
+				fetch: fetchMock,
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+			},
+		)
+
+		await client.start()
+
+		expect(client.getState()).toBe('connecting')
+		expect(client.getCallId()).toBe('live_test')
+		expect(fetchMock).toHaveBeenCalledWith(
+			'https://tachyon.example.test/v1/llms/chatrooms/chatroom_test/agent/live/session',
+			expect.objectContaining({ method: 'POST' }),
+		)
+		expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toMatchObject({
+			provider: 'openai',
+			session: {
+				model: 'gpt-live-1',
+				delegation: {
+					type: 'responses',
+					responses: { model: 'gpt-5.6-terra' },
+				},
+			},
+			transport: { type: 'webrtc', sdp: 'v=0 offer' },
+		})
+
+		transport.dataChannel.onmessage?.({
+			data: JSON.stringify({ type: 'session.started' }),
+		})
+		expect(client.getState()).toBe('connected')
+
+		expect(() => client.sendText('status report')).toThrow(
+			'GPT Liveではマイクから話しかけてください',
+		)
+		client.setMuted(true)
+		expect(transport.dataChannel.send.mock.calls.at(-1)?.[0]).toContain(
+			'session.input_audio.mute',
+		)
+		client.setMuted(false)
+		expect(transport.dataChannel.send.mock.calls.at(-1)?.[0]).toContain(
+			'session.input_audio.unmute',
+		)
+
+		const stopping = client.stop()
+		expect(transport.dataChannel.send.mock.calls.at(-1)?.[0]).toContain(
+			'session.close',
+		)
+		transport.dataChannel.onmessage?.({
+			data: JSON.stringify({ type: 'session.closed' }),
+		})
+		await stopping
+		expect(fetchMock).toHaveBeenCalledTimes(1)
+		expect(client.getState()).toBe('disconnected')
+	})
+
+	it('handles GPT Live input and output transcript events', async () => {
+		const transport = makeTransport()
+		const transcripts: Array<{ role: string; text: string; final: boolean }> = []
+		const client = new Realtime(
+			{ ...settings, model: 'gpt-live-1' },
+			{ transcript: transcript => transcripts.push(transcript) },
+			{
+				fetch: vi.fn<typeof fetch>().mockResolvedValue(
+					new Response(JSON.stringify({
+						session: { id: 'live_test' },
+						transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+					}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+				),
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+			},
+		)
+		await client.start()
+
+		for (const event of [
+			{ type: 'session.input_transcript.delta', delta: 'Hello', start_ms: 10, end_ms: 200 },
+			{ type: 'session.input_transcript.delta', delta: ' there', start_ms: 200, end_ms: 400 },
+			{ type: 'session.output_transcript.delta', delta: 'Hi', start_ms: 500, end_ms: 650 },
+			{ type: 'session.output_transcript.delta', delta: ' again', start_ms: 2_000, end_ms: 2_200 },
+		]) {
+			transport.dataChannel.onmessage?.({ data: JSON.stringify(event) })
+		}
+
+		expect(transcripts).toMatchObject([
+			{ id: 'live:user:0', role: 'user', text: 'Hello', final: false },
+			{ id: 'live:user:0', role: 'user', text: 'Hello there', final: false },
+			{ id: 'live:assistant:0', role: 'assistant', text: 'Hi', final: false },
+			{ id: 'live:assistant:1', role: 'assistant', text: ' again', final: false },
+		])
+		transport.dataChannel.readyState = 'closed'
+		await client.stop()
 	})
 
 	it('exchanges SDP through Tachyon, connects audio, handles mute and text', async () => {

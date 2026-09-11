@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X, ShieldCheck } from "lucide-react";
-import { DEFAULT_REALTIME_MODEL } from "../lib/realtime";
+import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL } from "../lib/realtime";
 export interface ConnectionSettings {
   baseUrl: string;
   tenantId: string;
@@ -8,6 +8,7 @@ export interface ConnectionSettings {
   cognitoClientId: string;
   chatroomId: string;
   model: string;
+  backendModel: string;
   voice: string;
   instructions: string;
 }
@@ -18,6 +19,7 @@ export const defaults: ConnectionSettings = {
   cognitoClientId: import.meta.env.VITE_COGNITO_CLIENT_ID || "3h68pjtkucobvs9r3ojja7q7m",
   chatroomId: "",
   model: DEFAULT_REALTIME_MODEL,
+  backendModel: DEFAULT_LIVE_BACKEND_MODEL,
   voice: "marin",
   instructions:
     "あなたはJARVIS。落ち着いた有能なパーソナルAIアシスタントです。日本語で短く自然に話し、必要な時は機転の利いた軽いユーモアを添えてください。実行していない操作を完了したと言わないでください。",
@@ -33,9 +35,9 @@ export function loadSettings(): ConnectionSettings {
           .map((k) => [k, saved[k]]),
       ),
     };
-    // Upgrade old defaults once; explicit choices saved by this version survive.
-    if (saved.realtimeModelVersion !== 1 &&
-        ["", "gpt-realtime", "gpt-realtime-2"].includes(settings.model)) {
+    // Upgrade the previous JARVIS defaults once; explicit custom choices survive.
+    if (saved.realtimeModelVersion !== 2 &&
+        ["", "gpt-realtime", "gpt-realtime-2", "gpt-realtime-2.1"].includes(settings.model)) {
       settings.model = DEFAULT_REALTIME_MODEL;
     }
     return settings;
@@ -45,7 +47,7 @@ export function loadSettings(): ConnectionSettings {
 }
 export function saveSettings(value: ConnectionSettings) {
   const safe = Object.fromEntries(Object.keys(defaults).map(key => [key, value[key as keyof ConnectionSettings]]));
-  localStorage.setItem("jarvis.settings", JSON.stringify({ ...safe, realtimeModelVersion: 1 }));
+  localStorage.setItem("jarvis.settings", JSON.stringify({ ...safe, realtimeModelVersion: 2 }));
 }
 export function Settings({
   value,
@@ -119,7 +121,7 @@ export function Settings({
         {field("chatroomId", "Chatroom ID", "空欄なら会話開始時に自動作成")}
         <div className="field-row">
           {field("model", "Model")}
-          <label>
+          {value.model !== DEFAULT_REALTIME_MODEL && <label>
             Voice
             <select
               value={value.voice}
@@ -140,8 +142,10 @@ export function Settings({
                 <option key={v}>{v}</option>
               ))}
             </select>
-          </label>
+          </label>}
         </div>
+        {value.model === DEFAULT_REALTIME_MODEL &&
+          field("backendModel", "Responses backend model", DEFAULT_LIVE_BACKEND_MODEL)}
         <label>
           パーソナリティ
           <textarea

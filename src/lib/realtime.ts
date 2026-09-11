@@ -1,5 +1,5 @@
 /**
- * Small browser-side adapter for Tachyon's OpenAI Realtime WebRTC endpoint.
+ * Browser-side adapter for Tachyon's OpenAI GPT Live and Realtime WebRTC endpoints.
  *
  * The provider credential stays on Tachyon. This client only sends the SDP
  * offer to Tachyon and applies the SDP answer returned by the API.
@@ -19,6 +19,7 @@ export interface RealtimeSettings {
 	token: string
 	chatroomId: string
 	model: string
+	backendModel: string
 	voice: string
 	instructions: string
 }
@@ -104,6 +105,7 @@ export interface RealtimeCallInfo {
 	callId: string | null
 	sideband: 'connected' | 'none'
 	sdp: string
+	protocol: 'live' | 'realtime'
 }
 
 type AnyListener = (payload: unknown) => void
@@ -113,6 +115,7 @@ type TranscriptBuffer = {
 	text: string
 	itemId?: string
 	responseId?: string
+	endMs?: number
 }
 
 type Transport = {
@@ -131,7 +134,8 @@ const EMPTY_TRANSPORT: Transport = {
 	remoteStream: null,
 }
 
-export const DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1'
+export const DEFAULT_REALTIME_MODEL = 'gpt-live-1'
+export const DEFAULT_LIVE_BACKEND_MODEL = 'gpt-5.6-terra'
 const DEFAULT_VOICE = 'marin'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -148,6 +152,7 @@ const getEventText = (event: RealtimeEvent) =>
 	readString(event, 'text')
 
 const isInputTranscriptEvent = (type: string) =>
+	type === 'session.input_transcript.delta' ||
 	type === 'conversation.item.input_audio_transcription.delta' ||
 	type === 'conversation.item.input_audio_transcription.completed' ||
 	type === 'conversation.item.input_audio_transcription.done' ||
@@ -156,6 +161,7 @@ const isInputTranscriptEvent = (type: string) =>
 	type === 'input_audio_transcription.done'
 
 const isAssistantTranscriptEvent = (type: string) =>
+	type === 'session.output_transcript.delta' ||
 	type === 'response.audio_transcript.delta' ||
 	type === 'response.audio_transcript.done' ||
 	type === 'response.audio_transcript.completed' ||
@@ -234,10 +240,18 @@ export class Realtime {
 	private currentState: RealtimeState = 'idle'
 	private currentCallId: string | null = null
 	private currentSideband: 'connected' | 'none' | null = null
+	private currentProtocol: 'live' | 'realtime' | null = null
+	private peerConnected = false
+	private liveSessionStarted = false
+	private liveCloseResolve: (() => void) | null = null
 	private muted = false
 	private operation = 0
 	private abortController: AbortController | null = null
 	private transcriptBuffers = new Map<string, TranscriptBuffer>()
+	private liveTranscriptSequences: Record<RealtimeTranscript['role'], number> = {
+		user: 0,
+		assistant: 0,
+	}
 	private cleanupPromises = new Map<string, Promise<void>>()
 	private cleanedCallIds = new Set<string>()
 	private stopPromise: Promise<void> | null = null
@@ -250,6 +264,7 @@ export class Realtime {
 		this.settings = {
 			...settings,
 			model: settings.model || DEFAULT_REALTIME_MODEL,
+			backendModel: settings.backendModel || DEFAULT_LIVE_BACKEND_MODEL,
 			voice: settings.voice || DEFAULT_VOICE,
 		}
 		this.dependencies = {
@@ -376,11 +391,16 @@ export class Realtime {
 		this.setState('connecting')
 		this.currentCallId = null
 		this.currentSideband = null
+		this.currentProtocol = null
+		this.peerConnected = false
+		this.liveSessionStarted = false
 		this.transcriptBuffers.clear()
+		this.liveTranscriptSequences = { user: 0, assistant: 0 }
 		this.disposeTransport()
 
 		let candidateTransport: Transport = { ...EMPTY_TRANSPORT }
 		let candidateCallId: string | null = null
+		let candidateProtocol: RealtimeCallInfo['protocol'] | null = null
 
 		try {
 			candidateTransport.peerConnection =
@@ -431,10 +451,11 @@ export class Realtime {
 				signal,
 			)
 			candidateCallId = call.callId
+			candidateProtocol = call.protocol
 
 			if (!this.isCurrent(operation, signal)) {
 				this.disposeTransport(candidateTransport)
-				if (candidateCallId) {
+				if (candidateCallId && candidateProtocol === 'realtime') {
 					await this.cleanupRemoteSession(candidateCallId)
 				}
 				return
@@ -443,6 +464,7 @@ export class Realtime {
 			this.transport = candidateTransport
 			this.currentCallId = call.callId
 			this.currentSideband = call.sideband
+			this.currentProtocol = call.protocol
 			await candidateTransport.peerConnection.setRemoteDescription({
 				type: 'answer',
 				sdp: call.sdp,
@@ -450,7 +472,7 @@ export class Realtime {
 
 			if (!this.isCurrent(operation, signal)) {
 				this.disposeTransport(candidateTransport)
-				if (candidateCallId) {
+				if (candidateCallId && candidateProtocol === 'realtime') {
 					await this.cleanupRemoteSession(candidateCallId)
 				}
 				return
@@ -458,9 +480,9 @@ export class Realtime {
 
 			// A mock or a very fast implementation can already be connected when
 			// setRemoteDescription resolves. Normal WebRTC emits this later.
-			if (candidateTransport.peerConnection.connectionState === 'connected') {
-				this.setState('connected')
-			}
+			this.peerConnected =
+				candidateTransport.peerConnection.connectionState === 'connected'
+			this.maybeSetConnected()
 		} catch (error) {
 			this.disposeTransport(candidateTransport)
 
@@ -492,8 +514,10 @@ export class Realtime {
 		this.abortController?.abort()
 		this.abortController = null
 		const callId = this.currentCallId
+		const protocol = this.currentProtocol
 		this.currentCallId = null
 		this.currentSideband = null
+		this.currentProtocol = null
 
 		if (
 			this.currentState === 'idle' &&
@@ -504,12 +528,17 @@ export class Realtime {
 		}
 
 		this.setState('disconnecting')
-		this.disposeTransport()
+		for (const track of this.transport.localStream?.getAudioTracks() ?? []) {
+			track.enabled = false
+			track.stop()
+		}
 		this.muted = false
 
 		this.stopPromise = (async () => {
 			try {
-				if (callId) {
+				if (protocol === 'live') {
+					await this.closeLiveSession()
+				} else if (callId) {
 					await this.cleanupRemoteSession(callId)
 				}
 			} catch (error) {
@@ -519,6 +548,9 @@ export class Realtime {
 				)
 				this.emit('error', realtimeError)
 			} finally {
+				this.disposeTransport()
+				this.peerConnected = false
+				this.liveSessionStarted = false
 				if (this.operation === operation) {
 					this.setState('disconnected')
 				}
@@ -537,6 +569,19 @@ export class Realtime {
 
 	setMuted(muted: boolean) {
 		this.muted = muted
+		const dataChannel = this.transport.dataChannel
+		if (
+			this.currentProtocol === 'live' &&
+			dataChannel?.readyState === 'open'
+		) {
+			dataChannel.send(
+				JSON.stringify({
+					type: muted
+						? 'session.input_audio.mute'
+						: 'session.input_audio.unmute',
+				}),
+			)
+		}
 		for (const track of this.transport.localStream?.getAudioTracks() ?? []) {
 			track.enabled = !muted
 		}
@@ -564,6 +609,12 @@ export class Realtime {
 				recoverable: true,
 			})
 		}
+		if (this.currentProtocol === 'live') {
+			throw new RealtimeError(
+				'GPT Liveではマイクから話しかけてください',
+				{ code: 'live_text_input_unsupported', recoverable: false },
+			)
+		}
 
 		dataChannel.send(
 			JSON.stringify({
@@ -585,6 +636,12 @@ export class Realtime {
 				code: 'no_active_call',
 				recoverable: false,
 			})
+		}
+		if (this.currentProtocol === 'live') {
+			throw new RealtimeError(
+				'GPT Live session updates are not available through the Realtime sideband endpoint',
+				{ code: 'live_session_update_unsupported', recoverable: false },
+			)
 		}
 
 		const response = await this.dependencies.fetch(
@@ -623,22 +680,41 @@ export class Realtime {
 			})
 		}
 
+		const live = this.settings.model === 'gpt-live-1'
 		const response = await this.dependencies.fetch(
 			makeUrl(
 				this.settings.baseUrl,
-				`/v1/llms/chatrooms/${encodeURIComponent(this.settings.chatroomId)}/agent/realtime/call`,
+				`/v1/llms/chatrooms/${encodeURIComponent(this.settings.chatroomId)}/agent/${live ? 'live/session' : 'realtime/call'}`,
 			),
 			{
 				method: 'POST',
 				headers: this.headers(),
-				body: JSON.stringify({
-					sdp,
-					provider: 'openai',
-					model: this.settings.model,
-					voice: this.settings.voice,
-					instructions: this.settings.instructions || undefined,
-					sideband: true,
-				}),
+				body: JSON.stringify(
+					live
+						? {
+							provider: 'openai',
+							session: {
+								model: this.settings.model,
+								instructions: this.settings.instructions || undefined,
+								delegation: {
+									type: 'responses',
+									responses: {
+										model: this.settings.backendModel,
+										instructions: this.settings.instructions || undefined,
+									},
+								},
+							},
+							transport: { type: 'webrtc', sdp },
+						}
+						: {
+							sdp,
+							provider: 'openai',
+							model: this.settings.model,
+							voice: this.settings.voice,
+							instructions: this.settings.instructions || undefined,
+							sideband: true,
+						},
+				),
 				signal,
 			},
 		)
@@ -647,7 +723,28 @@ export class Realtime {
 			throw await this.readHttpError(response, 'realtime_call_failed')
 		}
 
-		const sdpAnswer = await response.text()
+		let sdpAnswer: string
+		let callId: string | null
+		if (live) {
+			const body: unknown = await response.json()
+			if (!isRecord(body) || !isRecord(body.session) || !isRecord(body.transport)) {
+				throw new RealtimeError('Tachyon returned an invalid Live session', {
+					code: 'invalid_live_session',
+					status: response.status,
+				})
+			}
+			callId = readString(body.session, 'id') ?? null
+			sdpAnswer = readString(body.transport, 'sdp') ?? ''
+			if (!callId?.trim()) {
+				throw new RealtimeError('Tachyon returned a Live session without an ID', {
+					code: 'invalid_live_session',
+					status: response.status,
+				})
+			}
+		} else {
+			callId = response.headers.get('x-realtime-call-id')
+			sdpAnswer = await response.text()
+		}
 		if (!sdpAnswer.trim()) {
 			throw new RealtimeError('Tachyon returned an empty SDP answer', {
 				code: 'empty_sdp_answer',
@@ -658,12 +755,34 @@ export class Realtime {
 
 		return {
 			sdp: sdpAnswer,
-			callId: response.headers.get('x-realtime-call-id'),
+			callId,
 			sideband:
-				response.headers.get('x-realtime-sideband') === 'connected'
+				!live && response.headers.get('x-realtime-sideband') === 'connected'
 					? 'connected'
 					: 'none',
+			protocol: live ? 'live' : 'realtime',
 		}
+	}
+
+	private async closeLiveSession() {
+		const dataChannel = this.transport.dataChannel
+		if (!dataChannel || dataChannel.readyState !== 'open') {
+			return
+		}
+
+		await new Promise<void>(resolve => {
+			let settled = false
+			const finish = () => {
+				if (settled) return
+				settled = true
+				this.liveCloseResolve = null
+				clearTimeout(timer)
+				resolve()
+			}
+			const timer = setTimeout(finish, 1_000)
+			this.liveCloseResolve = finish
+			dataChannel.send(JSON.stringify({ type: 'session.close' }))
+		})
 	}
 
 	private async cleanupRemoteSession(callId: string) {
@@ -762,7 +881,8 @@ export class Realtime {
 			}
 			const state = peerConnection.connectionState
 			if (state === 'connected') {
-				this.setState('connected')
+				this.peerConnected = true
+				this.maybeSetConnected()
 				return
 			}
 			if (state === 'failed' || state === 'disconnected') {
@@ -795,7 +915,7 @@ export class Realtime {
 			}
 		}
 		dataChannel.onmessage = event => {
-			if (!this.isCurrent(operation)) {
+			if (!this.isCurrent(operation) && !this.liveCloseResolve) {
 				return
 			}
 			void this.handleDataChannelMessage(event.data)
@@ -812,6 +932,7 @@ export class Realtime {
 			this.setState('error')
 		}
 		dataChannel.onclose = () => {
+			this.liveCloseResolve?.()
 			if (!this.isCurrent(operation)) {
 				return
 			}
@@ -855,6 +976,13 @@ export class Realtime {
 		this.emit('event', event)
 
 		const type = readString(event, 'type') ?? ''
+		if (type === 'session.started') {
+			this.liveSessionStarted = true
+			this.maybeSetConnected()
+		}
+		if (type === 'session.closed') {
+			this.liveCloseResolve?.()
+		}
 		if (type === 'error') {
 			const errorPayload = isRecord(event.error) ? event.error : event
 			const message =
@@ -881,15 +1009,34 @@ export class Realtime {
 			return
 		}
 
+		const liveTranscript = type.startsWith('session.')
 		const itemId = readString(event, 'item_id')
 		const responseId = readString(event, 'response_id')
-		const id = itemId ?? responseId ?? `${role}:default`
+		let id = itemId ?? responseId ?? `${role}:default`
+		const startMs = typeof event.start_ms === 'number' ? event.start_ms : undefined
+		const endMs = typeof event.end_ms === 'number' ? event.end_ms : undefined
+		if (liveTranscript) {
+			let sequence = this.liveTranscriptSequences[role]
+			let currentId = `live:${role}:${sequence}`
+			const current = this.transcriptBuffers.get(currentId)
+			if (
+				current?.endMs !== undefined &&
+				startMs !== undefined &&
+				startMs - current.endMs > 1_200
+			) {
+				sequence += 1
+				this.liveTranscriptSequences[role] = sequence
+				currentId = `live:${role}:${sequence}`
+			}
+			id = currentId
+		}
 		const existing = this.transcriptBuffers.get(id) ?? {
 			role,
 			text: '',
 			itemId,
 			responseId,
 		}
+		if (endMs !== undefined) existing.endMs = endMs
 		const text = getEventText(event)
 		const final = isFinalTranscriptEvent(type)
 
@@ -949,6 +1096,16 @@ export class Realtime {
 		}
 		this.currentState = nextState
 		this.emit('state', nextState)
+	}
+
+	private maybeSetConnected() {
+		if (
+			this.currentState === 'connecting' &&
+			this.peerConnected &&
+			(this.currentProtocol !== 'live' || this.liveSessionStarted)
+		) {
+			this.setState('connected')
+		}
 	}
 
 	private emit<K extends keyof RealtimeEventMap>(
