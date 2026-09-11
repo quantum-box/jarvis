@@ -222,11 +222,19 @@ export default function App() {
     client.current = null;
     void previousClient?.disconnect();
     const next: RealtimeClient = new RealtimeClient({
-      onStateChange: (value) => { if (client.current === next) setState(value); },
+      onStateChange: (value) => {
+        if (client.current !== next) return;
+        if (value === 'error' || value === 'disconnected') stopBrowserTools();
+        setState(value);
+      },
       onLevel: (value) => { if (client.current === next) setLevel(value); },
       onOutputLevel: (value) => { if (client.current === next) setOutputLevel(value); },
       onActivityChange: (value) => { if (client.current === next) setActivity(value); },
-      onError: (value) => { if (client.current === next) setError(value); },
+      onError: (value) => {
+        if (client.current !== next) return;
+        stopBrowserTools();
+        setError(value);
+      },
       onEvent: (event) => {
         if (client.current !== next) return;
         if (event.type === 'data_channel.open' && browserAvailable && normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL) {
@@ -268,6 +276,7 @@ export default function App() {
       );
     } catch (e) {
       if (client.current !== next || connectionAttempt.current !== attempt) return;
+      stopBrowserTools();
       setState('error');
       setError(
         e instanceof Error
