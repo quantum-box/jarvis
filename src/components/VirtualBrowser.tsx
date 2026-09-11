@@ -122,7 +122,7 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 	const begin = (event: ReactPointerEvent<HTMLElement>, kind: BrowserWindowInteraction['kind']) => {
 		if (event.button !== 0) return
 		event.currentTarget.setPointerCapture(event.pointerId)
-		onActivate(status.id)
+		if (status.visible) onActivate(status.id)
 		interaction.current = {
 			kind,
 			pointerId: event.pointerId,
@@ -140,7 +140,6 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 		if (interaction.current?.pointerId === event.pointerId) interaction.current = null
 	}
 	const setVisible = (visible: boolean) => {
-		onActivate(status.id)
 		void browserRequest<BrowserStatus>('set_visible', { id: status.id, visible })
 			.then(onUpdate)
 			.catch(error => onError(String(error)))
@@ -156,13 +155,13 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 			className={`virtual-browser ${status.visible ? '' : 'is-minimized'}`}
 			style={{ left: bounds.x, top: bounds.y, width: status.visible ? bounds.width : Math.min(bounds.width, 220), height: status.visible ? bounds.height : 34, '--browser-frame-opacity': status.opacity } as CSSProperties}
 			aria-label="JARVIS内ブラウザ"
-			onPointerDown={() => onActivate(status.id)}
+			onPointerDown={() => { if (status.visible) onActivate(status.id) }}
 			onPointerMove={move}
 			onPointerUp={end}
 			onPointerCancel={end}
 		>
 			{status.visible ? <>
-				<div className="virtual-browser__floating-controls">
+				<div className="virtual-browser__floating-controls" onPointerDown={event => event.stopPropagation()}>
 					<button className="virtual-browser__drag" aria-label="ブラウザを移動" onPointerDown={event => { event.stopPropagation(); begin(event, 'move') }}><GripHorizontal size={15} /></button>
 					<button aria-label="ブラウザを最小化" onClick={() => setVisible(false)}><Minus size={14} /></button>
 					<button aria-label="ブラウザを閉じる" onClick={close}><X size={14} /></button>

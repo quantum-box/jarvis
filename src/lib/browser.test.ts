@@ -258,6 +258,25 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations).toEqual([])
 	})
 
+	it('requires approval when a named host is given a model-invented non-default port', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('example.comを開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com:8443/' }, 'port-nav'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
+
+	it('allows an explicitly named non-default port', async () => {
+		const f = fixture()
+		f.runner.setUserUtterance('example.com:8443を開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com:8443/' }, 'explicit-port-nav'))
+		await f.runner.settled()
+		expect(f.approve).not.toHaveBeenCalled()
+		expect(f.operations).toEqual([{ operation: 'navigate', args: { url: 'https://example.com:8443/' } }])
+	})
+
 	it('can clear an editable field after local approval', async () => {
 		const approve = vi.fn(async () => true)
 		const f = fixture(approve)
@@ -325,7 +344,18 @@ describe('BrowserToolRunner', () => {
 			operation,
 			detail: snapshot.url,
 		}))
-		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'snapshot'])
+	})
+
+	it('shows the complete typed value in local approval', async () => {
+		const value = 'x'.repeat(150)
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-long-type'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_type', { reference: 'e3-3', text: value }, 'long-type'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledWith(expect.objectContaining({ detail: value }))
 	})
 
 	it('allows a positive request for a named root destination', async () => {
@@ -369,7 +399,23 @@ describe('BrowserToolRunner', () => {
 		f.runner.handle(done('browser_back', { browser_id: 'managed-browser-2' }, 'wrong-history'))
 		await f.runner.settled()
 		expect(approve).not.toHaveBeenCalled()
-		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'snapshot'])
+	})
+
+	it('refreshes the current page before showing history approval', async () => {
+		const current = { ...snapshot, url: 'https://example.com/changed' }
+		let snapshots = 0
+		const approve = vi.fn(async () => false)
+		const request = vi.fn(async (operation: string) => {
+			if (operation === 'snapshot') return ++snapshots === 1 ? snapshot : current
+			return { ok: true }
+		}) as unknown as typeof browserRequest
+		const runner = new BrowserToolRunner({ sendEvent: () => {} }, request, approve)
+		runner.handle(done('browser_snapshot', {}, 'old-history-snapshot'))
+		await runner.settled()
+		runner.handle(done('browser_back', { browser_id: snapshot.browserId }, 'fresh-history-context'))
+		await runner.settled()
+		expect(approve).toHaveBeenCalledWith(expect.objectContaining({ detail: current.url }))
 	})
 
 	it.each([
@@ -458,12 +504,24 @@ describe('BrowserToolRunner', () => {
 		const f = fixture(approve)
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-scroll'))
 		await f.runner.settled()
-		f.runner.handle(done('browser_scroll', { delta_y: 500 }, 'scroll'))
+		f.runner.handle(done('browser_scroll', { browser_id: snapshot.browserId, delta_y: 500 }, 'scroll'))
 		await f.runner.settled()
 		f.runner.handle(done('browser_click', { reference: 'e3-1' }, 'stale-after-scroll'))
 		await f.runner.settled()
 		expect(approve).toHaveBeenCalledOnce()
-		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'scroll'])
+		expect(f.operations).toEqual([
+			{ operation: 'snapshot', args: {} },
+			{ operation: 'scroll', args: { id: snapshot.browserId, deltaY: 500 } },
+		])
+	})
+
+	it('rejects scrolling when the snapshotted browser id changed', async () => {
+		const f = fixture()
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-wrong-scroll'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_scroll', { browser_id: 'managed-browser-2', delta_y: 500 }, 'wrong-scroll'))
+		await f.runner.settled()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 })
 

@@ -141,7 +141,8 @@ export const BROWSER_TOOLS = [
 		'Type into a snapshotted editable control. This can auto-save or auto-submit and requires local authorization.',
 		{ reference, text: { type: 'string', maxLength: 20_000 } },
 	),
-	tool('browser_scroll', 'Scroll the current page by a signed pixel amount.', {
+	tool('browser_scroll', 'Scroll the snapshotted managed browser by a signed pixel amount.', {
+		browser_id: { type: 'string', description: 'Exact browserId returned by browser_snapshot.' },
 		delta_y: { type: 'number', minimum: -5000, maximum: 5000 },
 	}),
 	tool('browser_back', 'Go back in the snapshotted managed browser history.', {
@@ -263,13 +264,14 @@ const utteranceRequestsHostnameNavigation = (utterance: string, hostname: string
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
+		const destinationName = url.port && url.port !== '443' ? url.host : url.hostname
 		return (
 			!utteranceHasNegation(utterance) &&
 			url.pathname === '/' &&
 			!url.search &&
 			!url.hash &&
-			utteranceNamesHostname(utterance, url.hostname) &&
-			utteranceRequestsHostnameNavigation(utterance, url.hostname)
+			utteranceNamesHostname(utterance, destinationName) &&
+			utteranceRequestsHostnameNavigation(utterance, destinationName)
 		)
 	} catch {
 		return false
@@ -448,11 +450,16 @@ export class BrowserToolRunner {
 					output = { action: output, after }
 					break
 				}
-				case 'scroll':
+				case 'scroll': {
 					if (typeof args.delta_y !== 'number') throw new Error('スクロール量が正しくありません。')
-					output = await this.request('scroll', { deltaY: args.delta_y })
+					const browserId = textArg(args, 'browser_id')
+					if (!this.snapshot || browserId !== this.snapshot.browserId) {
+						throw new Error('対象のブラウザが切り替わりました。もう一度ページを確認してください。')
+					}
+					output = await this.request('scroll', { id: browserId, deltaY: args.delta_y })
 					this.snapshot = null
 					break
+				}
 				case 'back':
 				case 'forward':
 				case 'close': {
@@ -508,7 +515,7 @@ export class BrowserToolRunner {
 					utteranceContains(this.utterance, value),
 			)
 			description = `${element?.label || 'フォーム'}へ文字を入力します。入力により自動保存・送信される可能性があります。`
-			detail = value.length > 120 ? `${value.slice(0, 120)}…` : value
+			detail = value
 		} else if (operation === 'close') {
 			if (!this.snapshot) {
 				this.snapshot = await this.request<BrowserSnapshot>('snapshot')
@@ -522,17 +529,16 @@ export class BrowserToolRunner {
 			detail = this.snapshot?.url
 		} else if (operation === 'back' || operation === 'forward') {
 			explicit = false
-			if (!this.snapshot) {
-				this.snapshot = await this.request<BrowserSnapshot>('snapshot')
-			}
 			const browserId = textArg(args, 'browser_id')
-			if (browserId !== this.snapshot.browserId) {
+			const current = await this.request<BrowserSnapshot>('snapshot')
+			this.snapshot = current
+			if (browserId !== current.browserId) {
 				throw new Error('対象のブラウザが切り替わりました。もう一度ページを確認してください。')
 			}
 			description = operation === 'back'
 				? '表示中のJARVIS内ブラウザで前のページへ戻ります。'
 				: '表示中のJARVIS内ブラウザで次のページへ進みます。'
-			detail = this.snapshot?.url
+			detail = current.url
 		} else if (operation === 'click') {
 			const reference = textArg(args, 'reference')
 			const element = this.element(reference)

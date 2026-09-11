@@ -749,6 +749,7 @@ mod platform {
             browsers.remove(&id);
             browsers
                 .iter()
+                .filter(|(_, meta)| meta.visible)
                 .max_by_key(|(_, meta)| meta.z_order)
                 .map(|(id, _)| id.clone())
         } else {
@@ -841,13 +842,31 @@ mod platform {
         visible: bool,
     ) -> Result<BrowserStatus, String> {
         let browser = webview_by_id(app, &id)?;
-        set_active(&id);
         if visible {
+            set_active(&id);
             raise(&browser)?;
+            let _ = app.emit_to("main", ACTIVATED_EVENT, id.clone());
         }
         if let Ok(mut browsers) = browsers().lock() {
             if let Some(meta) = browsers.get_mut(&id) {
                 meta.visible = visible;
+            }
+        }
+        if !visible && active_id().as_deref() == Some(id.as_str()) {
+            let next_active = browsers().lock().ok().and_then(|browsers| {
+                browsers
+                    .iter()
+                    .filter(|(candidate_id, meta)| candidate_id.as_str() != id && meta.visible)
+                    .max_by_key(|(_, meta)| meta.z_order)
+                    .map(|(candidate_id, _)| candidate_id.clone())
+            });
+            if let Ok(mut active) = ACTIVE_BROWSER.lock() {
+                if active.as_deref() == Some(id.as_str()) {
+                    *active = next_active.clone();
+                }
+            }
+            if let Some(next_active) = next_active {
+                let _ = app.emit_to("main", ACTIVATED_EVENT, next_active);
             }
         }
         apply_visibility(&id, &browser)?;
@@ -1032,14 +1051,28 @@ mod platform {
         }
         return true;
       };
+      const intersectsVisibleClips = (rect, el) => {
+        let left = 0, top = 0, right = innerWidth, bottom = innerHeight;
+        for (let current = el; current; current = current.parentElement) {
+          const style = getComputedStyle(current);
+          const clipsX = ['auto','scroll','hidden','clip'].includes(style.overflowX);
+          const clipsY = ['auto','scroll','hidden','clip'].includes(style.overflowY);
+          if (clipsX || clipsY) {
+            const clip = current.getBoundingClientRect();
+            if (clipsX) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+            if (clipsY) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+          }
+        }
+        return rect.width > 0 && rect.height > 0 && rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom;
+      };
       const visible = el => {
         const rect = el.getBoundingClientRect();
-        return styleVisible(el) && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+        return styleVisible(el) && intersectsVisibleClips(rect, el);
       };
       const visibleText = node => {
         if (!styleVisible(node.parentElement)) return false;
         const range = document.createRange(); range.selectNodeContents(node);
-        return [...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth);
+        return [...range.getClientRects()].some(rect => intersectsVisibleClips(rect, node.parentElement));
       };
       const role = el => el.getAttribute('role') || (el.isContentEditable ? 'textbox' : ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase()));
       const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
@@ -1282,22 +1315,28 @@ mod platform {
             if (!textInput || el.matches(':disabled') || (!el.isContentEditable && Boolean(el.readOnly))) return {{ok:false,error:'not_editable'}};
             el.focus();
             let selectedLabel = null;
+            const originalValue = el instanceof HTMLSelectElement ? [...el.options].map(option => option.selected) : (el.isContentEditable ? el.innerHTML : el.value);
+            const restore = () => {{
+              if (el instanceof HTMLSelectElement) [...el.options].forEach((option, index) => {{ option.selected = originalValue[index]; }});
+              else if (el.isContentEditable) el.innerHTML = originalValue;
+              else {{ const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, originalValue); }}
+            }};
             if (el instanceof HTMLSelectElement) {{
               const matching = [...el.options].filter(option => !option.disabled && !option.closest('optgroup[disabled]') && clean(option.textContent) === clean(value));
               if (matching.length !== 1) return {{ok:false,error:'unknown_or_ambiguous_option'}};
               const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
               if (!setter) return {{ok:false,error:'not_editable'}};
               setter.call(el, matching[0].value); selectedLabel = clean(matching[0].textContent);
-              if (el.value !== matching[0].value) return {{ok:false,error:'value_rejected'}};
+              if (el.value !== matching[0].value) {{ restore(); return {{ok:false,error:'value_rejected'}}; }}
             }} else if (el.isContentEditable) {{ el.textContent = value; }} else {{
               const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
               const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set; if (!setter) return {{ok:false,error:'not_editable'}}; setter.call(el, value);
-              if (el.value !== value) return {{ok:false,error:'value_rejected'}};
+              if (el.value !== value) {{ restore(); return {{ok:false,error:'value_rejected'}}; }}
             }}
             el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}}));
             const finalValue = el instanceof HTMLSelectElement ? el.value : (el.isContentEditable ? el.textContent : el.value);
             const expectedValue = el instanceof HTMLSelectElement ? [...el.options].find(option => !option.disabled && !option.closest('optgroup[disabled]') && clean(option.textContent) === clean(value))?.value : value;
-            if (finalValue !== expectedValue) return {{ok:false,error:'value_rejected'}};
+            if (finalValue !== expectedValue) {{ restore(); return {{ok:false,error:'value_rejected'}}; }}
             state.refs.clear(); return {{ok:true,kind:'type',label:label(el),selectedLabel}};"#
         );
         let (id, local_reference, browser) = referenced_webview(app, &reference)?;
@@ -1311,10 +1350,15 @@ mod platform {
         Ok(result)
     }
 
-    pub async fn scroll(app: &AppHandle, delta_y: f64) -> Result<Value, String> {
+    pub async fn scroll(app: &AppHandle, id: String, delta_y: f64) -> Result<Value, String> {
+        if active_id().as_deref() != Some(id.as_str()) {
+            return Err(
+                "対象のブラウザが切り替わりました。もう一度ページを確認してください。".into(),
+            );
+        }
         let value = delta_y.clamp(-5000.0, 5000.0);
         eval_isolated(
-            &active_webview(app)?,
+            &webview_by_id(app, &id)?,
             format!(r#"(() => {{
               const state = globalThis.__jarvisManagedBrowserV1;
               if (state) {{ state.revision += 1; state.refs.clear(); }}
@@ -1640,12 +1684,12 @@ pub async fn browser_type(
 }
 
 #[tauri::command]
-pub async fn browser_scroll(app: AppHandle, delta_y: f64) -> Result<Value, String> {
+pub async fn browser_scroll(app: AppHandle, id: String, delta_y: f64) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
-    return platform::scroll(&app, delta_y).await;
+    return platform::scroll(&app, id, delta_y).await;
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, delta_y);
+        let _ = (app, id, delta_y);
         Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
