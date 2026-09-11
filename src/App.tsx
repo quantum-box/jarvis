@@ -6,6 +6,7 @@ import {
   AudioLines,
   ChevronRight,
   CircleHelp,
+  Globe2,
   MessageSquare,
   Mic,
   MicOff,
@@ -20,6 +21,7 @@ import { Settings, loadSettings } from "./components/Settings";
 import { UpdateController } from "./lib/updater";
 import { AppUpdate } from "./components/AppUpdate";
 import { StartupUpdatePrompt, startupUpdateVersion as getStartupUpdateVersion } from "./components/StartupUpdatePrompt";
+import { VirtualBrowser } from './components/VirtualBrowser';
 import { listenForUpdateCheck } from "./lib/app-menu";
 import { Login } from './components/Login';
 import { AuthSession } from './lib/auth';
@@ -33,6 +35,15 @@ import {
   type AssistantActivity,
   type TranscriptItem,
 } from "./lib/realtime";
+import {
+  BrowserToolRunner,
+  browserBackendConfig,
+  browserRequest,
+  browserSessionConfig,
+  isManagedBrowserAvailable,
+  loadBrowserOpacity,
+  type BrowserApprovalRequest,
+} from "./lib/browser";
 
 export default function App() {
   const [updater] = useState(() => new UpdateController());
@@ -67,11 +78,31 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [now, setNow] = useState(new Date());
   const client = useRef<RealtimeClient | null>(null);
+  const browserTools = useRef<BrowserToolRunner | null>(null);
+  const browserApprovalResolver = useRef<((approved: boolean) => void) | null>(null);
+  const [browserApproval, setBrowserApproval] = useState<BrowserApprovalRequest | null>(null);
+  const browserAvailable = isManagedBrowserAvailable();
   const messageEnd = useRef<HTMLDivElement>(null);
   const connected = state === "connected";
   const busy = state === "connecting";
   const conversationActive = connected || busy;
   const textInputSupported = normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL;
+  const startupPromptVisible = Boolean(
+    startupUpdateVersion &&
+    updateState.phase === 'available' &&
+    updateState.version === startupUpdateVersion &&
+    dismissedUpdateVersion !== startupUpdateVersion,
+  );
+  const browserExecutionObscured = showSettings || Boolean(loginSession) || startupPromptVisible;
+  const browserObscured = browserExecutionObscured || Boolean(browserApproval);
+  useEffect(() => {
+    browserTools.current?.setSuspended(browserExecutionObscured);
+  }, [browserExecutionObscured]);
+  useEffect(() => {
+    if (!browserAvailable) return;
+    void browserRequest('set_opacity', { opacity: loadBrowserOpacity() })
+      .catch(e => setError(e instanceof Error ? e.message : String(e)));
+  }, [browserAvailable]);
   useEffect(() => {
     let removeListener: (() => void) | undefined;
     let disposed = false;
@@ -89,7 +120,11 @@ export default function App() {
   }, [updater]);
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
-    const endSession = () => { void client.current?.disconnect(); };
+    const endSession = () => {
+      browserTools.current?.stop();
+      browserApprovalResolver.current?.(false);
+      void client.current?.disconnect();
+    };
     window.addEventListener('pagehide', endSession);
     return () => {
       clearInterval(timer);
@@ -160,6 +195,7 @@ export default function App() {
   }
   async function logout() {
     connectionAttempt.current++;
+    stopBrowserTools();
     const auth = authRef.current;
     authRef.current = null; authSubscription.current?.();
     const activeClient = client.current;
@@ -171,6 +207,7 @@ export default function App() {
     finally { await auth?.logout(); }
   }
   async function connect() {
+    stopBrowserTools();
     if (restoring) return;
     if (updater.blocksConversation) { setShowSettings(true); return; }
     const auth = authRef.current;
@@ -190,13 +227,32 @@ export default function App() {
     client.current = null;
     void previousClient?.disconnect();
     const next: RealtimeClient = new RealtimeClient({
-      onStateChange: (value) => { if (client.current === next) setState(value); },
+      onStateChange: (value) => {
+        if (client.current !== next) return;
+        if (value === 'error' || value === 'disconnected') stopBrowserTools();
+        setState(value);
+      },
       onLevel: (value) => { if (client.current === next) setLevel(value); },
       onOutputLevel: (value) => { if (client.current === next) setOutputLevel(value); },
       onActivityChange: (value) => { if (client.current === next) setActivity(value); },
-      onError: (value) => { if (client.current === next) setError(value); },
+      onError: (value) => {
+        if (client.current !== next) return;
+        stopBrowserTools();
+        setError(value);
+      },
+      onEvent: (event) => {
+        if (client.current !== next) return;
+        if (event.type === 'data_channel.open' && browserAvailable && normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL) {
+          next.sendEvent(browserSessionConfig(settings.instructions));
+        }
+        if (event.type === 'input_audio_buffer.speech_started' || event.type === 'session.input_transcript.delta') {
+          resolveBrowserApproval(false);
+        }
+        browserTools.current?.handle(event);
+      },
       onTranscript: (item) => {
         if (client.current !== next) return;
+        if (item.role === 'user') browserTools.current?.setUserUtterance(item.text);
         setMessages((previous) => {
           const index = previous.findIndex((m) => m.id === item.id);
           return index < 0
@@ -206,6 +262,10 @@ export default function App() {
       },
     });
     client.current = next;
+    browserTools.current = browserAvailable
+      ? new BrowserToolRunner(next, browserRequest, requestBrowserApproval, setError)
+      : null;
+    browserTools.current?.setSuspended(browserExecutionObscured);
     try {
       const token = await auth.getAccessToken();
       if (attempt !== connectionAttempt.current || authRef.current !== auth) return;
@@ -213,9 +273,16 @@ export default function App() {
       const chatroomId = settings.chatroomId.trim() || await createChatroom(settings.baseUrl, settings.tenantId, transport.fetch);
       if (attempt !== connectionAttempt.current || authRef.current !== auth) return;
       setSettings(previous => ({...previous, chatroomId}));
-      await next.connect({...settings, chatroomId, token}, transport);
+      await next.connect(
+        {...settings, chatroomId, token},
+        transport,
+        browserAvailable && normalizeRealtimeModel(settings.model) === DEFAULT_REALTIME_MODEL
+          ? browserBackendConfig(settings.instructions)
+          : {},
+      );
     } catch (e) {
       if (client.current !== next || connectionAttempt.current !== attempt) return;
+      stopBrowserTools();
       setState('error');
       setError(
         e instanceof Error
@@ -226,9 +293,38 @@ export default function App() {
   }
   function stop() {
     connectionAttempt.current++;
+    stopBrowserTools();
     client.current?.disconnect();
     setState('idle');
     setMuted(false);
+  }
+  function stopBrowserTools() {
+    browserTools.current?.stop();
+    browserTools.current = null;
+    browserApprovalResolver.current?.(false);
+    browserApprovalResolver.current = null;
+    setBrowserApproval(null);
+  }
+  function requestBrowserApproval(request: BrowserApprovalRequest) {
+    return new Promise<boolean>((resolve) => {
+      browserApprovalResolver.current?.(false);
+      browserApprovalResolver.current = resolve;
+      setBrowserApproval(request);
+    });
+  }
+  function resolveBrowserApproval(approved: boolean) {
+    const resolve = browserApprovalResolver.current;
+    browserApprovalResolver.current = null;
+    setBrowserApproval(null);
+    resolve?.(approved);
+  }
+  async function openBrowser() {
+    try {
+      await browserRequest('create');
+      setError('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
   function toggleMute() {
     client.current?.setMuted(!muted);
@@ -236,10 +332,15 @@ export default function App() {
   }
   function send() {
     if (!draft.trim() || !connected) return;
+    const text = draft.trim();
     try {
-      client.current?.sendText(draft.trim());
+      resolveBrowserApproval(false);
+      browserTools.current?.interrupt();
+      browserTools.current?.setUserUtterance(text);
+      client.current?.sendText(text);
       setDraft("");
     } catch (e) {
+      browserTools.current?.setUserUtterance('');
       setError(e instanceof Error ? e.message : "送信できませんでした。");
     }
   }
@@ -262,6 +363,7 @@ export default function App() {
           <div className="brand-name">JARVIS</div>
         </div>
         <div className="top-right">
+          {browserAvailable && <button className="icon-button" aria-label="アプリ内ブラウザを開く" title="アプリ内ブラウザ" onClick={() => void openBrowser()}><Globe2 size={18}/></button>}
           <button ref={conversationToggle} className="icon-button" aria-label={showConversation ? '会話を閉じる' : '会話を開く'} aria-expanded={showConversation} aria-controls="conversation-panel" onClick={() => setShowConversation(v => !v)}><MessageSquare size={18}/></button>
           <button className="account-button" aria-label={identity ? `${identity.user.username}からログアウト` : "Tachyonにログイン"} title={identity ? "ログアウト" : "Tachyonにログイン"} onClick={() => { if (identity) void logout().catch(e => setError(e instanceof Error ? e.message : String(e))); else openLogin(); }} disabled={busy || restoring}>{identity ? <LogOut size={15}/> : <LogIn size={15}/>}<span>{identity ? identity.user.username : restoring ? 'ログイン状態を復元中' : 'Tachyonにログイン'}</span></button>
           <time>
@@ -446,6 +548,12 @@ export default function App() {
           </form>
         </aside>
       </div>
+      {browserAvailable && (
+        <VirtualBrowser
+          obscured={browserObscured}
+          onError={setError}
+        />
+      )}
       {showSettings && !restoring && (
         <Settings
           appUpdate={<AppUpdate controller={updater} conversationActive={conversationActive} />}
@@ -456,10 +564,7 @@ export default function App() {
           tenants={identity?.tenants}
         />
       )}
-      {startupUpdateVersion &&
-        updateState.phase === 'available' &&
-        updateState.version === startupUpdateVersion &&
-        dismissedUpdateVersion !== startupUpdateVersion && (
+      {startupPromptVisible && startupUpdateVersion && (
           <StartupUpdatePrompt
             currentVersion={updateState.currentVersion}
             version={startupUpdateVersion}
@@ -473,6 +578,21 @@ export default function App() {
             }}
           />
         )}
+      {browserApproval && (
+        <div className="browser-approval-backdrop" role="presentation">
+          <section className="browser-approval" role="dialog" aria-modal="true" aria-labelledby="browser-approval-title">
+            <span className="eyebrow">Browser action</span>
+            <h2 id="browser-approval-title">この操作を1回だけ許可しますか？</h2>
+            <p>{browserApproval.description}</p>
+            {browserApproval.detail && <code>{browserApproval.detail}</code>}
+            <p className="muted">Webページの内容は信頼せず、今の依頼に必要な場合だけ許可してください。</p>
+            <div className="browser-approval-actions">
+              <button className="text-button" onClick={() => resolveBrowserApproval(false)}>許可しない</button>
+              <button className="primary" onClick={() => resolveBrowserApproval(true)}>1回だけ許可</button>
+            </div>
+          </section>
+        </div>
+      )}
       {loginSession && <Login auth={loginSession} onAuthenticated={() => finishLogin(loginSession)} onClose={cancelLogin}/>}
     </div>
   );

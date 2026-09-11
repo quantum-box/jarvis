@@ -197,6 +197,45 @@ describe('Realtime', () => {
 		expect(client.getState()).toBe('disconnected')
 	})
 
+	it('places local tools in the initial GPT Live Responses delegation', async () => {
+		const transport = makeTransport()
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+			new Response(JSON.stringify({
+				session: { id: 'live_tools' },
+				transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+			}), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+		)
+		const client = new Realtime(
+			{ ...settings, model: 'gpt-live-1' },
+			{},
+			{
+				fetch: fetchMock,
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia: vi.fn(async () => transport.stream),
+			},
+			{
+				backend: {
+					instructions: 'Use local browser tools.',
+					tools: [{ type: 'function', name: 'browser_snapshot' }],
+					toolChoice: 'auto',
+					parallelToolCalls: false,
+				},
+			},
+		)
+
+		await client.start()
+		const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)
+		expect(body.session.delegation.responses).toMatchObject({
+			instructions: 'Use local browser tools.',
+			tools: [{ type: 'function', name: 'browser_snapshot' }],
+			tool_choice: 'auto',
+			parallel_tool_calls: false,
+		})
+
+		transport.dataChannel.readyState = 'closed'
+		await client.stop()
+	})
+
 	it.each([
 		['a provider error', () => ({
 			type: 'error',

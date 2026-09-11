@@ -24,6 +24,17 @@ export interface RealtimeSettings {
 	instructions: string
 }
 
+export interface RealtimeBackendConfig {
+	instructions?: string
+	tools?: Array<Record<string, unknown>>
+	toolChoice?: unknown
+	parallelToolCalls?: boolean
+}
+
+export interface RealtimeConnectOptions {
+	backend?: RealtimeBackendConfig
+}
+
 export interface RealtimeTranscript {
 	id: string
 	role: 'user' | 'assistant'
@@ -248,6 +259,7 @@ const toErrorMessage = (error: unknown, fallback: string) =>
  */
 export class Realtime {
 	private readonly settings: RealtimeSettings
+	private readonly connectOptions: RealtimeConnectOptions
 	private readonly dependencies: Omit<Required<RealtimeDependencies>, 'startupTimeouts'>
 	private readonly startupTimeouts: RealtimeStartupTimeouts
 	private readonly listeners = new Map<
@@ -280,6 +292,7 @@ export class Realtime {
 		settings: RealtimeSettings,
 		listeners: RealtimeListeners = {},
 		dependencies: RealtimeDependencies = {},
+		connectOptions: RealtimeConnectOptions = {},
 	) {
 		this.settings = {
 			...settings,
@@ -311,6 +324,7 @@ export class Realtime {
 			...DEFAULT_STARTUP_TIMEOUTS,
 			...dependencies.startupTimeouts,
 		}
+		this.connectOptions = connectOptions
 
 		for (const eventName of Object.keys(listeners) as Array<
 			keyof RealtimeEventMap
@@ -708,6 +722,18 @@ export class Realtime {
 		dataChannel.send(JSON.stringify({ type: 'response.create' }))
 	}
 
+	/** Send a local client event through the active Realtime data channel. */
+	sendEvent(event: RealtimeEvent) {
+		const dataChannel = this.transport.dataChannel
+		if (!dataChannel || dataChannel.readyState !== 'open') {
+			throw new RealtimeError('Realtime data channel is not open', {
+				code: 'data_channel_not_open',
+				recoverable: true,
+			})
+		}
+		dataChannel.send(JSON.stringify(event))
+	}
+
 	/** Send a session.update through Tachyon's backend sideband channel. */
 	async updateSession(update: RealtimeSessionUpdate): Promise<void> {
 		if (!this.currentCallId) {
@@ -760,6 +786,7 @@ export class Realtime {
 		}
 
 		const live = this.settings.model === 'gpt-live-1'
+		const backend = this.connectOptions.backend
 		const response = await this.dependencies.fetch(
 			makeUrl(
 				this.settings.baseUrl,
@@ -779,7 +806,12 @@ export class Realtime {
 									type: 'responses',
 									responses: {
 										model: this.settings.backendModel,
-										instructions: this.settings.instructions || undefined,
+										instructions:
+											(backend?.instructions ?? this.settings.instructions) ||
+											undefined,
+										tools: backend?.tools,
+										tool_choice: backend?.toolChoice,
+										parallel_tool_calls: backend?.parallelToolCalls,
 									},
 								},
 							},
@@ -1314,6 +1346,7 @@ export interface RealtimeClientCallbacks {
 	onActivityChange?: (activity: AssistantActivity) => void
 	onError?: (message: string, error?: RealtimeError) => void
 	onTranscript?: (item: TranscriptItem) => void
+	onEvent?: (event: RealtimeEvent) => void
 }
 
 export type AssistantActivity =
@@ -1351,6 +1384,7 @@ export class RealtimeClient {
 	async connect(
 		settings: RealtimeSettings,
 		dependencies: RealtimeDependencies = {},
+		connectOptions: RealtimeConnectOptions = {},
 	): Promise<void> {
 		await this.disconnect()
 
@@ -1379,6 +1413,7 @@ export class RealtimeClient {
 					this.resetActivityAndLevels()
 				},
 				event: event => {
+					this.callbacks.onEvent?.(event)
 					this.updateEventLevel(event)
 				},
 				track: stream => {
@@ -1387,6 +1422,7 @@ export class RealtimeClient {
 				},
 			},
 			dependencies,
+			connectOptions,
 		)
 		this.realtime = realtime
 		this.resetActivityAndLevels()
@@ -1433,6 +1469,16 @@ export class RealtimeClient {
 			})
 		}
 		this.realtime.sendText(text)
+	}
+
+	sendEvent(event: RealtimeEvent) {
+		if (!this.realtime) {
+			throw new RealtimeError('Realtime is not connected', {
+				code: 'not_connected',
+				recoverable: true,
+			})
+		}
+		this.realtime.sendEvent(event)
 	}
 
 	getState() {
