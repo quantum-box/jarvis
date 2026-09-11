@@ -10,7 +10,8 @@ function fixture() {
   roots.push(root);
   mkdirSync(join(root, 'src-tauri')); mkdirSync(join(root, 'bin'));
   writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '0.2.0' }));
-  writeFileSync(join(root, 'src-tauri/tauri.conf.json'), JSON.stringify({ version: '0.2.0', identifier: 'com.quantumbox.jarvis' }));
+  writeFileSync(join(root, 'src-tauri/tauri.conf.json'), JSON.stringify({ version: '0.2.0', identifier: 'com.quantumbox.jarvis', bundle: { macOS: { entitlements: './entitlements.plist' } } }));
+  writeFileSync(join(root, 'src-tauri/entitlements.plist'), '<plist><dict><key>com.apple.security.device.audio-input</key><true/></dict></plist>');
   writeFileSync(join(root, 'src-tauri/Cargo.toml'), 'version = "0.2.0"\n');
   writeFileSync(join(root, 'AuthKey_TEST.p8'), 'fixture private key');
   // Emulate only the build process, never a signing or installation proof.
@@ -31,13 +32,15 @@ fs.mkdirSync(output, {recursive: true});
 fs.writeFileSync(output + '/Info.plist', 'fixture plist');
 `, { mode: 0o755 });
   writeFileSync(join(root, 'bin/plutil'), `#!/usr/bin/env node
-const key = process.argv[process.argv.indexOf('-extract') + 1];
+const key = process.argv[process.argv.indexOf('-extract') + 1].replaceAll('\\\\.', '.');
 if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
 else if (key === 'NSMicrophoneUsageDescription') process.stdout.write('JARVIS needs microphone access.\\n');
+else if (key === 'com.apple.security.device.audio-input') process.stdout.write('true\\n');
 else process.exit(1);
 `, { mode: 0o755 });
   writeFileSync(join(root, 'bin/codesign'), `#!/usr/bin/env node
-if (process.argv.includes('-d')) process.stderr.write([
+if (process.argv.includes('--entitlements')) process.stdout.write('<plist><dict><key>com.apple.security.device.audio-input</key><true/></dict></plist>');
+else if (process.argv.includes('-d')) process.stderr.write([
   'Identifier=com.quantumbox.jarvis',
   'Authority=Developer ID Application: Quantum Box, Inc. (J8429VCGMR)',
   'TeamIdentifier=J8429VCGMR',
@@ -95,13 +98,26 @@ it('does not copy an archive when notarized app verification fails', () => {
 it('does not copy an archive when the microphone usage description is missing', () => {
   const f = fixture();
   writeFileSync(join(f.root, 'bin/plutil'), `#!/usr/bin/env node
-const key = process.argv[process.argv.indexOf('-extract') + 1];
+const key = process.argv[process.argv.indexOf('-extract') + 1].replaceAll('\\\\.', '.');
 if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
 else process.exit(1);
 `, { mode: 0o755 });
   const result = f.run();
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain('NSMicrophoneUsageDescription');
+  expect(() => readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/0.2.0/JARVIS.app.tar.gz'))).toThrow();
+}, 15_000);
+it('does not copy an archive when the signed app lacks the microphone entitlement', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'bin/plutil'), `#!/usr/bin/env node
+const key = process.argv[process.argv.indexOf('-extract') + 1].replaceAll('\\\\.', '.');
+if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
+else if (key === 'NSMicrophoneUsageDescription') process.stdout.write('JARVIS needs microphone access.\\n');
+else process.exit(1);
+`, { mode: 0o755 });
+  const result = f.run();
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('com.apple.security.device.audio-input');
   expect(() => readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/0.2.0/JARVIS.app.tar.gz'))).toThrow();
 }, 15_000);
 it('rejects a version mismatch before building', () => {
