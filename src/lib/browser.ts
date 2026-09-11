@@ -144,9 +144,15 @@ export const BROWSER_TOOLS = [
 	tool('browser_scroll', 'Scroll the current page by a signed pixel amount.', {
 		delta_y: { type: 'number', minimum: -5000, maximum: 5000 },
 	}),
-	tool('browser_back', 'Go back in managed browser history.', {}),
-	tool('browser_forward', 'Go forward in managed browser history.', {}),
-	tool('browser_close', 'Close the managed in-app browser window.', {}),
+	tool('browser_back', 'Go back in the snapshotted managed browser history.', {
+		browser_id: { type: 'string', description: 'Exact browserId returned by browser_snapshot.' },
+	}),
+	tool('browser_forward', 'Go forward in the snapshotted managed browser history.', {
+		browser_id: { type: 'string', description: 'Exact browserId returned by browser_snapshot.' },
+	}),
+	tool('browser_close', 'Close the snapshotted managed in-app browser window.', {
+		browser_id: { type: 'string', description: 'Exact browserId returned by browser_snapshot.' },
+	}),
 ]
 
 export const BROWSER_INSTRUCTIONS = `
@@ -233,14 +239,26 @@ const utteranceNamesHostname = (utterance: string, hostname: string) => {
 }
 
 const negationWords =
-	/(しないでください?|しない|しません|しなくて|するな|せず|ずに|ないでください?|やめ(?:て|る)?|禁止|不要|\b(?:don't|do\s+not|never|not)\b)/i
+	/(しないでください?|しない|しません|しなくて|するな|せず|ずに|ないでください?|行かない|行かず|開かない|開かず|やめ(?:て|る)?|禁止|不要|\b(?:don't|do\s+not|never|not)\b)/i
 
 const utteranceHasNegation = (utterance: string) => negationWords.test(utterance)
 
 const typingWords =
 	/(入力して|入力する|記入して|記入する|タイプして|タイプする|書き込んで|書き込む|貼り付けて|貼り付ける|ペーストして|ペーストする|打ち込んで|打ち込む|書いて|入れて|\b(?:type|enter|fill|write|paste)\b)/i
 
-const closeWords = /(閉じて|閉じる|終了して|終了する|\bclose\b)/i
+const explicitlyClosesBrowser = (utterance: string) =>
+	!utteranceHasNegation(utterance) &&
+	/(?:ブラウザ|ページ|サイト|タブ|ウィンドウ)(?:を|も)?(?:閉じて|終了して)|\bclose\s+(?:the\s+)?(?:browser|page|site|tab|window)\b/i.test(utterance)
+
+const utteranceRequestsHostnameNavigation = (utterance: string, hostname: string) => {
+	const host = escapeRegExp(hostname.normalize('NFKC').toLocaleLowerCase())
+	const value = utterance.normalize('NFKC').toLocaleLowerCase()
+	const boundaryBefore = '(^|[^a-z0-9.-])'
+	const boundaryAfter = '(?=[^a-z0-9.-]|$)'
+	const japanese = new RegExp(`${boundaryBefore}${host}${boundaryAfter}(?:の(?:サイト|ページ))?(?:を|に|へ)?(?:開いて|行って|アクセスして|移動して)`, 'i')
+	const english = new RegExp(`\\b(?:open|visit|go\\s+to|navigate\\s+to)\\s+(?:https?://)?${host}${boundaryAfter}`, 'i')
+	return japanese.test(value) || english.test(value)
+}
 
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
@@ -250,7 +268,8 @@ const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 			url.pathname === '/' &&
 			!url.search &&
 			!url.hash &&
-			utteranceNamesHostname(utterance, url.hostname)
+			utteranceNamesHostname(utterance, url.hostname) &&
+			utteranceRequestsHostnameNavigation(utterance, url.hostname)
 		)
 	} catch {
 		return false
@@ -436,10 +455,14 @@ export class BrowserToolRunner {
 					break
 				case 'back':
 				case 'forward':
-				case 'close':
-					output = await this.request(operation)
+				case 'close': {
+					const browserId = textArg(args, 'browser_id')
+					output = await this.request(operation, operation === 'close'
+						? { id: browserId, activeOnly: true }
+						: { id: browserId })
 					this.snapshot = null
 					break
+				}
 				default:
 					throw new Error('未対応のブラウザ操作です。')
 			}
@@ -487,13 +510,24 @@ export class BrowserToolRunner {
 			description = `${element?.label || 'フォーム'}へ文字を入力します。入力により自動保存・送信される可能性があります。`
 			detail = value.length > 120 ? `${value.slice(0, 120)}…` : value
 		} else if (operation === 'close') {
-			explicit = !utteranceHasNegation(this.utterance) && closeWords.test(this.utterance)
+			if (!this.snapshot) {
+				this.snapshot = await this.request<BrowserSnapshot>('snapshot')
+			}
+			const browserId = textArg(args, 'browser_id')
+			if (browserId !== this.snapshot.browserId) {
+				throw new Error('対象のブラウザが切り替わりました。もう一度ページを確認してください。')
+			}
+			explicit = explicitlyClosesBrowser(this.utterance)
 			description = '表示中のJARVIS内ブラウザを閉じます。未保存の入力内容が失われる可能性があります。'
 			detail = this.snapshot?.url
 		} else if (operation === 'back' || operation === 'forward') {
 			explicit = false
 			if (!this.snapshot) {
 				this.snapshot = await this.request<BrowserSnapshot>('snapshot')
+			}
+			const browserId = textArg(args, 'browser_id')
+			if (browserId !== this.snapshot.browserId) {
+				throw new Error('対象のブラウザが切り替わりました。もう一度ページを確認してください。')
 			}
 			description = operation === 'back'
 				? '表示中のJARVIS内ブラウザで前のページへ戻ります。'

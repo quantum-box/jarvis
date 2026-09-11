@@ -276,19 +276,38 @@ describe('BrowserToolRunner', () => {
 		const approve = vi.fn(async () => false)
 		const f = fixture(approve)
 		f.runner.setUserUtterance('ページを見せて')
-		f.runner.handle(done('browser_close', {}, 'ambiguous-close'))
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-ambiguous-close'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_close', { browser_id: snapshot.browserId }, 'ambiguous-close'))
 		await f.runner.settled()
 		expect(approve).toHaveBeenCalledOnce()
-		expect(f.operations).toEqual([])
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
 	it('allows an explicit positive request to close the browser', async () => {
 		const f = fixture()
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-close'))
+		await f.runner.settled()
 		f.runner.setUserUtterance('ブラウザを閉じて')
-		f.runner.handle(done('browser_close', {}, 'explicit-close'))
+		f.runner.handle(done('browser_close', { browser_id: snapshot.browserId }, 'explicit-close'))
 		await f.runner.settled()
 		expect(f.approve).not.toHaveBeenCalled()
-		expect(f.operations.map(item => item.operation)).toEqual(['close'])
+		expect(f.operations).toEqual([
+			{ operation: 'snapshot', args: {} },
+			{ operation: 'close', args: { id: snapshot.browserId, activeOnly: true } },
+		])
+	})
+
+	it('does not apply a close request for another UI object to the browser', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-settings-close'))
+		await f.runner.settled()
+		f.runner.setUserUtterance('設定画面を閉じて')
+		f.runner.handle(done('browser_close', { browser_id: snapshot.browserId }, 'settings-close'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
 	it.each([
@@ -300,7 +319,7 @@ describe('BrowserToolRunner', () => {
 		f.runner.handle(done('browser_snapshot', {}, `snapshot-${operation}`))
 		await f.runner.settled()
 		f.runner.setUserUtterance(operation === 'back' ? '戻って' : '進んで')
-		f.runner.handle(done(tool, {}, operation))
+		f.runner.handle(done(tool, { browser_id: snapshot.browserId }, operation))
 		await f.runner.settled()
 		expect(approve).toHaveBeenCalledWith(expect.objectContaining({
 			operation,
@@ -309,16 +328,61 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
+	it('allows a positive request for a named root destination', async () => {
+		const f = fixture()
+		f.runner.setUserUtterance('example.comを開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/' }, 'positive-navigation'))
+		await f.runner.settled()
+		expect(f.approve).not.toHaveBeenCalled()
+		expect(f.operations).toEqual([
+			{ operation: 'navigate', args: { url: 'https://example.com/' } },
+		])
+	})
+
+	it('does not connect a hostname to an unrelated open action', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('example.comはそのままで設定画面を開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/' }, 'unrelated-navigation'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
+
 	it('takes a local snapshot before approving history navigation when needed', async () => {
 		const approve = vi.fn(async () => false)
 		const f = fixture(approve)
-		f.runner.handle(done('browser_back', {}, 'back-without-snapshot'))
+		f.runner.handle(done('browser_back', { browser_id: snapshot.browserId }, 'back-without-snapshot'))
 		await f.runner.settled()
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 		expect(approve).toHaveBeenCalledWith(expect.objectContaining({
 			operation: 'back',
 			detail: snapshot.url,
 		}))
+	})
+
+	it('rejects history navigation when the snapshotted browser id changed', async () => {
+		const approve = vi.fn(async () => true)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-wrong-history'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_back', { browser_id: 'managed-browser-2' }, 'wrong-history'))
+		await f.runner.settled()
+		expect(approve).not.toHaveBeenCalled()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
+	it.each([
+		'example.comには行かない',
+		'example.comは開かずに調べて',
+	])('does not authorize a negated bare navigation: %s', async utterance => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance(utterance)
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/' }, 'negated-navigation'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
 	})
 
 	it('does not authorize query data on a cross-origin link from a hostname mention', async () => {

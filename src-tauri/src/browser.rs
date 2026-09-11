@@ -128,7 +128,7 @@ mod platform {
         url.as_str() == BLANK_URL
     }
 
-    fn active_id() -> Option<String> {
+    pub(super) fn active_id() -> Option<String> {
         ACTIVE_BROWSER.lock().ok().and_then(|id| id.clone())
     }
 
@@ -191,6 +191,13 @@ mod platform {
                                 .is_ok()
                         {
                             set_active(&callback_id);
+                            if let Some(parent) = view.superview() {
+                                parent.addSubview_positioned_relativeTo(
+                                    view,
+                                    objc2_app_kit::NSWindowOrderingMode::Above,
+                                    None,
+                                );
+                            }
                             let _ =
                                 callback_app.emit_to("main", ACTIVATED_EVENT, callback_id.clone());
                         }
@@ -540,7 +547,15 @@ mod platform {
                 });
                 if let Some((_, finished)) = finished.filter(|(loads, _)| *loads > start) {
                     let current = browser.url().ok().map(|url| url.to_string());
-                    if Some(finished) == current {
+                    if Some(finished.clone()) == current {
+                        break;
+                    }
+                    if current
+                        .as_deref()
+                        .is_some_and(|current| same_origin_url_strings(&finished, current))
+                        && eval(browser, "document.readyState".into()).await.ok()
+                            == Some(Value::String("complete".into()))
+                    {
                         break;
                     }
                 }
@@ -549,6 +564,18 @@ mod platform {
         })
         .await
         .map_err(|_| "ページの読み込みがタイムアウトしました。".to_string())
+    }
+
+    pub(super) fn same_origin_url_strings(left: &str, right: &str) -> bool {
+        let Ok(left) = tauri::Url::parse(left) else {
+            return false;
+        };
+        let Ok(right) = tauri::Url::parse(right) else {
+            return false;
+        };
+        left.scheme() == right.scheme()
+            && left.host_str() == right.host_str()
+            && left.port_or_known_default() == right.port_or_known_default()
     }
 
     async fn wait_for_history_navigation(
@@ -945,7 +972,7 @@ mod platform {
         use objc2_foundation::{NSError, NSString};
         use objc2_web_kit::{WKContentWorld, WKWebView};
 
-        let script = format!("JSON.stringify({script})");
+        let script = format!("return JSON.stringify(await ({script}));");
         let (send, receive) = oneshot::channel();
         let send = Arc::new(Mutex::new(Some(send)));
         browser
@@ -975,8 +1002,9 @@ mod platform {
                         }
                     }
                 });
-                webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                webview.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
                     &NSString::from_str(&script),
+                    None,
                     None,
                     &content_world,
                     Some(&handler),
@@ -1266,7 +1294,11 @@ mod platform {
               const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set; if (!setter) return {{ok:false,error:'not_editable'}}; setter.call(el, value);
               if (el.value !== value) return {{ok:false,error:'value_rejected'}};
             }}
-            el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); state.refs.clear(); return {{ok:true,kind:'type',label:label(el),selectedLabel}};"#
+            el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}}));
+            const finalValue = el instanceof HTMLSelectElement ? el.value : (el.isContentEditable ? el.textContent : el.value);
+            const expectedValue = el instanceof HTMLSelectElement ? [...el.options].find(option => !option.disabled && !option.closest('optgroup[disabled]') && clean(option.textContent) === clean(value))?.value : value;
+            if (finalValue !== expectedValue) return {{ok:false,error:'value_rejected'}};
+            state.refs.clear(); return {{ok:true,kind:'type',label:label(el),selectedLabel}};"#
         );
         let (id, local_reference, browser) = referenced_webview(app, &reference)?;
         let previous_url = browser.url().ok().map(|url| url.to_string());
@@ -1315,8 +1347,13 @@ mod platform {
         .await
     }
 
-    pub async fn history(app: &AppHandle, forward: bool) -> Result<Value, String> {
-        let (id, browser) = webview(app)?;
+    pub async fn history(app: &AppHandle, id: String, forward: bool) -> Result<Value, String> {
+        if active_id().as_deref() != Some(id.as_str()) {
+            return Err(
+                "対象のブラウザが切り替わりました。もう一度ページを確認してください。".into(),
+            );
+        }
+        let browser = webview_by_id(app, &id)?;
         let previous_url = browser.url().ok().map(|url| url.to_string());
         let command = if forward {
             "history.forward()"
@@ -1347,7 +1384,7 @@ mod platform {
         if host != domain && !host.ends_with(&format!(".{domain}")) {
             return Ok(StorageClearStatus::NotMatched);
         }
-        let result = eval(
+        let result = eval_isolated(
             &browser,
             r#"(async () => {
               const failures = [];
@@ -1529,12 +1566,27 @@ pub async fn browser_set_content_visible(app: AppHandle, visible: bool) -> Resul
 }
 
 #[tauri::command]
-pub async fn browser_close(app: AppHandle, id: Option<String>) -> Result<BrowserStatus, String> {
+pub async fn browser_close(
+    app: AppHandle,
+    id: Option<String>,
+    active_only: Option<bool>,
+) -> Result<BrowserStatus, String> {
     #[cfg(target_os = "macos")]
-    return platform::close(&app, id);
+    {
+        if active_only.unwrap_or(false)
+            && id
+                .as_deref()
+                .map_or(true, |id| platform::active_id().as_deref() != Some(id))
+        {
+            return Err(
+                "対象のブラウザが切り替わりました。もう一度ページを確認してください。".into(),
+            );
+        }
+        platform::close(&app, id)
+    }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, id);
+        let _ = (app, id, active_only);
         Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
@@ -1599,23 +1651,23 @@ pub async fn browser_scroll(app: AppHandle, delta_y: f64) -> Result<Value, Strin
 }
 
 #[tauri::command]
-pub async fn browser_back(app: AppHandle) -> Result<Value, String> {
+pub async fn browser_back(app: AppHandle, id: String) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
-    return platform::history(&app, false).await;
+    return platform::history(&app, id, false).await;
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
+        let _ = (app, id);
         Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
 #[tauri::command]
-pub async fn browser_forward(app: AppHandle) -> Result<Value, String> {
+pub async fn browser_forward(app: AppHandle, id: String) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
-    return platform::history(&app, true).await;
+    return platform::history(&app, id, true).await;
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
+        let _ = (app, id);
         Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
@@ -1625,12 +1677,24 @@ pub use platform::{clear_current_storage, ensure_webview};
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::platform::safe_url_summary;
+    use super::platform::{safe_url_summary, same_origin_url_strings};
 
     #[test]
     fn strips_path_query_and_fragment_from_reported_urls() {
         let url =
             tauri::Url::parse("https://example.com/private/token?secret=value#fragment").unwrap();
         assert_eq!(safe_url_summary(&url), "https://example.com/");
+    }
+
+    #[test]
+    fn recognizes_same_origin_url_changes_after_load() {
+        assert!(same_origin_url_strings(
+            "https://example.com/start",
+            "https://example.com/replaced?ready=1#done"
+        ));
+        assert!(!same_origin_url_strings(
+            "https://example.com/start",
+            "https://other.example/start"
+        ));
     }
 }

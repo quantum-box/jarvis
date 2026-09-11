@@ -168,6 +168,32 @@ mod platform {
             .unwrap_or(false)
     }
 
+    fn cookie_domains_for_target(domain: &str) -> Vec<String> {
+        let registrable = psl::domain_str(domain).unwrap_or(domain);
+        let mut current = domain;
+        let mut domains = vec![domain.to_string(), format!(".{domain}")];
+        while current != registrable {
+            let Some((_, parent)) = current.split_once('.') else {
+                break;
+            };
+            current = parent;
+            if current != domain {
+                domains.push(format!(".{current}"));
+            }
+        }
+        domains
+    }
+
+    pub(super) fn cookie_host_matches_target(raw_host: &str, domain: &str) -> bool {
+        let raw_host = raw_host.to_ascii_lowercase();
+        let host = raw_host.trim_start_matches('.');
+        host == domain
+            || host.ends_with(&format!(".{domain}"))
+            || (raw_host.starts_with('.')
+                && domain.ends_with(&format!(".{host}"))
+                && psl::domain_str(host) == psl::domain_str(domain))
+    }
+
     fn chrome_key() -> Result<[u8; 16], String> {
         let mut password =
             security_framework::passwords::get_generic_password(CHROME_SERVICE, CHROME_ACCOUNT)
@@ -235,15 +261,22 @@ mod platform {
         } else {
             "''"
         };
+        let domains = cookie_domains_for_target(domain);
+        let placeholders = (1..=domains.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let descendant_index = domains.len() + 1;
         let sql = format!(
-            "SELECT host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,has_expires,samesite,{partition} FROM cookies WHERE host_key = ?1 OR host_key = ?2 OR substr(host_key, -length(?2)) = ?2"
+            "SELECT host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,has_expires,samesite,{partition} FROM cookies WHERE host_key IN ({placeholders}) OR substr(host_key, -length(?{descendant_index})) = ?{descendant_index}"
         );
         let mut statement = connection
             .prepare(&sql)
             .map_err(|_| "ChromeのCookieデータ形式を読み取れませんでした。".to_string())?;
-        let dotted = format!(".{domain}");
+        let mut parameters = domains;
+        parameters.push(format!(".{domain}"));
         let rows = statement
-            .query_map([domain, dotted.as_str()], |row| {
+            .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
                 Ok(CookieRow {
                     host: row.get(0)?,
                     name: row.get(1)?,
@@ -393,8 +426,8 @@ mod platform {
         let mut deleted = 0;
         let mut failed = 0;
         for cookie in cookies {
-            let host = cookie.domain().unwrap_or_default().trim_start_matches('.');
-            if host == domain || host.ends_with(&format!(".{domain}")) {
+            let host = cookie.domain().unwrap_or_default();
+            if cookie_host_matches_target(host, &domain) {
                 if browser.delete_cookie(cookie).is_ok() {
                     deleted += 1;
                 } else {
@@ -457,7 +490,8 @@ pub async fn clear_browser_site_data(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::platform::{
-        database_version, decrypt_value, matching_hosts_for_test, normalize_domain,
+        cookie_host_matches_target, database_version, decrypt_value, matching_hosts_for_test,
+        normalize_domain,
     };
     use aes::Aes128;
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
@@ -514,6 +548,41 @@ mod tests {
         let mut hosts = matching_hosts_for_test(&connection, "foo_bar.com").unwrap();
         hosts.sort();
         assert_eq!(hosts, [".sub.foo_bar.com", "foo_bar.com"]);
+    }
+
+    #[test]
+    fn includes_applicable_parent_domain_cookies() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cookies (
+                    host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB,
+                    path TEXT, expires_utc INTEGER, is_secure INTEGER,
+                    is_httponly INTEGER, has_expires INTEGER, samesite INTEGER
+                );
+                INSERT INTO cookies VALUES
+                    ('login.example.com','a','v',x'','/',0,0,0,0,0),
+                    ('.login.example.com','b','v',x'','/',0,0,0,0,0),
+                    ('.example.com','c','v',x'','/',0,0,0,0,0),
+                    ('example.com','d','v',x'','/',0,0,0,0,0),
+                    ('.other.example.com','e','v',x'','/',0,0,0,0,0);",
+            )
+            .unwrap();
+
+        let mut hosts = matching_hosts_for_test(&connection, "login.example.com").unwrap();
+        hosts.sort();
+        assert_eq!(
+            hosts,
+            [".example.com", ".login.example.com", "login.example.com"]
+        );
+        assert!(cookie_host_matches_target(
+            ".example.com",
+            "login.example.com"
+        ));
+        assert!(!cookie_host_matches_target(
+            "example.com",
+            "login.example.com"
+        ));
     }
 
     #[test]
