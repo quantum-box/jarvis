@@ -30,6 +30,20 @@ if (!microphoneUsageDescription) {
 }
 
 run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
+// `:-` asks codesign for the raw plist; `-` renders a human-readable tree on current macOS.
+const entitlements = spawnSync('codesign', ['-d', '--entitlements', ':-', appPath], { encoding: 'utf8' });
+if (entitlements.status !== 0) {
+  const detail = `${entitlements.stdout || ''}\n${entitlements.stderr || ''}`.trim();
+  throw new Error(`Unable to read code-signing entitlements${detail ? `: ${detail}` : ''}`);
+}
+const audioInput = spawnSync(
+  'plutil',
+  ['-extract', 'com\\.apple\\.security\\.device\\.audio-input', 'raw', '-o', '-', '-'],
+  { encoding: 'utf8', input: entitlements.stdout },
+);
+if (audioInput.status !== 0 || audioInput.stdout.trim() !== 'true') {
+  throw new Error('Signed app must allow com.apple.security.device.audio-input');
+}
 const signature = run('codesign', ['-d', '--verbose=4', appPath]);
 const fields = new Map(
   signature.split(/\r?\n/).flatMap(line => {
