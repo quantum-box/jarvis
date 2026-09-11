@@ -141,50 +141,6 @@ mod platform {
             .ok_or_else(|| "ChromeのCookieデータが見つかりませんでした。".into())
     }
 
-    struct TempDatabase(PathBuf);
-    impl Drop for TempDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn copy_database(app: &AppHandle, source: &std::path::Path) -> Result<TempDatabase, String> {
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let dir = app
-            .path()
-            .app_cache_dir()
-            .map_err(|_| "一時フォルダを作成できませんでした。".to_string())?
-            .join(format!(
-                "chrome-cookie-import-{}-{nonce}",
-                std::process::id()
-            ));
-        fs::create_dir_all(&dir).map_err(|_| "一時フォルダを作成できませんでした。".to_string())?;
-        let target = dir.join("Cookies");
-        if fs::copy(source, &target).is_err() {
-            let _ = fs::remove_dir_all(&dir);
-            return Err("ChromeのCookieデータを読み取り用にコピーできませんでした。".into());
-        }
-        for suffix in ["-wal", "-shm"] {
-            let source_sidecar = PathBuf::from(format!("{}{suffix}", source.display()));
-            if source_sidecar.is_file()
-                && fs::copy(
-                    source_sidecar,
-                    PathBuf::from(format!("{}{suffix}", target.display())),
-                )
-                .is_err()
-            {
-                let _ = fs::remove_dir_all(&dir);
-                return Err(
-                    "ChromeのCookie更新データを読み取り用にコピーできませんでした。".into(),
-                );
-            }
-        }
-        Ok(TempDatabase(dir))
-    }
-
     pub(crate) fn database_version(connection: &Connection) -> i64 {
         connection
             .query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
@@ -353,15 +309,22 @@ mod platform {
     ) -> Result<CookieImportResult, String> {
         let domain = normalize_domain(&domain)?;
         let source = validate_profile(app, &profile)?;
-        let temp = copy_database(app, &source)?;
-        let connection = Connection::open_with_flags(
-            temp.0.join("Cookies"),
+        // Reading the live database through SQLite keeps the main file and WAL in one
+        // consistent snapshot. Copying those files separately can lose a checkpoint
+        // that happens between copies and also leaves sensitive full-database copies.
+        let mut connection = Connection::open_with_flags(
+            source,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|_| "ChromeのCookieデータを開けませんでした。".to_string())?;
-        let version = database_version(&connection);
-        let rows = read_rows(&connection, &domain)?;
-        drop(connection);
+        let transaction = connection
+            .transaction()
+            .map_err(|_| "ChromeのCookieデータを読み取り用に固定できませんでした。".to_string())?;
+        let version = database_version(&transaction);
+        let rows = read_rows(&transaction, &domain)?;
+        transaction
+            .rollback()
+            .map_err(|_| "ChromeのCookieデータの読み取りを終了できませんでした。".to_string())?;
         let browser = crate::browser::ensure_webview(app, false)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)

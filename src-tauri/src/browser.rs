@@ -39,7 +39,7 @@ mod platform {
     use std::collections::HashMap;
     use std::sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
     };
     use std::time::Duration;
     use tauri::{
@@ -52,6 +52,7 @@ mod platform {
     const LABEL_PREFIX: &str = "managed-browser";
     const COOKIE_HELPER_LABEL: &str = "managed-browser-cookie-store";
     const STATUS_EVENT: &str = "managed-browser-status";
+    const ACTIVATED_EVENT: &str = "managed-browser-activated";
     const DEFAULT_URL: &str = "https://www.google.com/";
     const BLANK_URL: &str = "about:blank";
     const FRAME_TOP: f64 = 92.0;
@@ -64,10 +65,12 @@ mod platform {
     const MIN_WEBVIEW_OPACITY: f64 = 0.35;
     static BROWSER_CONTENT_VISIBLE: AtomicBool = AtomicBool::new(true);
     static NEXT_BROWSER_ID: AtomicU64 = AtomicU64::new(1);
+    static NEXT_Z_ORDER: AtomicU64 = AtomicU64::new(1);
     static NEXT_REFERENCE_SCOPE: AtomicU64 = AtomicU64::new(1);
     static ACTIVE_BROWSER: Mutex<Option<String>> = Mutex::new(None);
     static BROWSER_OPACITY: Mutex<f64> = Mutex::new(DEFAULT_WEBVIEW_OPACITY);
     static BROWSERS: OnceLock<Mutex<HashMap<String, BrowserMeta>>> = OnceLock::new();
+    static CLICK_MONITOR_INSTALLED: OnceLock<()> = OnceLock::new();
 
     #[derive(Clone)]
     struct BrowserMeta {
@@ -75,6 +78,7 @@ mod platform {
         title: String,
         bounds: BrowserBounds,
         order: u64,
+        z_order: u64,
         opacity: f64,
         finished_page_loads: u64,
         finished_page_url: String,
@@ -129,9 +133,82 @@ mod platform {
     }
 
     fn set_active(id: &str) {
+        let z_order = NEXT_Z_ORDER.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut browsers) = browsers().lock() {
+            if let Some(meta) = browsers.get_mut(id) {
+                meta.z_order = z_order;
+            }
+        }
         if let Ok(mut active) = ACTIVE_BROWSER.lock() {
             *active = Some(id.to_string());
         }
+    }
+
+    fn install_click_monitor(app: &AppHandle) {
+        CLICK_MONITOR_INSTALLED.get_or_init(|| {
+            use block2::RcBlock;
+            use objc2_app_kit::{NSEvent, NSEventMask, NSView};
+            use std::ptr::NonNull;
+
+            let app = app.clone();
+            let monitor = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+                let event = unsafe { event.as_ref() };
+                let location = event.locationInWindow();
+                let window_number = event.windowNumber();
+                let mut candidates = browsers()
+                    .lock()
+                    .ok()
+                    .map(|browsers| {
+                        browsers
+                            .iter()
+                            .filter(|(_, meta)| meta.visible)
+                            .map(|(id, meta)| (meta.z_order, id.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                candidates.sort_by_key(|(order, _)| std::cmp::Reverse(*order));
+                let claimed = Arc::new(AtomicBool::new(false));
+                for (_, id) in candidates {
+                    let Ok(browser) = webview_by_id(&app, &id) else {
+                        continue;
+                    };
+                    let callback_app = app.clone();
+                    let callback_id = id.clone();
+                    let callback_claimed = claimed.clone();
+                    let _ = browser.with_webview(move |webview| unsafe {
+                        if callback_claimed.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let view: &NSView = &*webview.inner().cast();
+                        let same_window = view
+                            .window()
+                            .is_some_and(|window| window.windowNumber() == window_number);
+                        let local = view.convertPoint_fromView(location, None);
+                        if same_window
+                            && view.hitTest(local).is_some()
+                            && callback_claimed
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                        {
+                            set_active(&callback_id);
+                            let _ =
+                                callback_app.emit_to("main", ACTIVATED_EVENT, callback_id.clone());
+                        }
+                    });
+                }
+                event as *const NSEvent as *mut NSEvent
+            });
+            let retained = unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                    NSEventMask::LeftMouseDown,
+                    &monitor,
+                )
+            };
+            if let Some(retained) = retained {
+                // The monitor is process-wide and intentionally lives for the app lifetime.
+                std::mem::forget(retained);
+            }
+        });
     }
 
     fn webview_by_id(app: &AppHandle, id: &str) -> Result<Webview, String> {
@@ -311,6 +388,7 @@ mod platform {
         visible: bool,
         bounds: Option<BrowserBounds>,
     ) -> Result<(String, Webview), String> {
+        install_click_monitor(app);
         let data_dir = browser_data_dir(app)?;
 
         let order = NEXT_BROWSER_ID.fetch_add(1, Ordering::AcqRel);
@@ -367,6 +445,7 @@ mod platform {
                     title: String::new(),
                     bounds: frame,
                     order,
+                    z_order: NEXT_Z_ORDER.fetch_add(1, Ordering::AcqRel),
                     opacity,
                     finished_page_loads: 0,
                     finished_page_url: String::new(),
@@ -397,6 +476,9 @@ mod platform {
                 .hide()
                 .map_err(|_| "ブラウザを非表示にできませんでした。".to_string())?;
         }
+        // Publish the frame as soon as the native child exists so slow pages never
+        // cover the app without matching controls in the React layer.
+        emit_status(app, &id);
         Ok((id, browser))
     }
 
@@ -586,7 +668,10 @@ mod platform {
         } else {
             let target = validate_url(url.as_deref().unwrap_or(DEFAULT_URL))?;
             let (id, browser) = create_webview(app, target, true, bounds)?;
-            wait_for_page_load(&id, &browser, 0).await?;
+            if let Err(error) = wait_for_page_load(&id, &browser, 0).await {
+                let _ = close(app, Some(id));
+                return Err(error);
+            }
             (id, browser)
         };
         set_active(&id);
@@ -597,7 +682,10 @@ mod platform {
 
     pub async fn create(app: &AppHandle) -> Result<BrowserStatus, String> {
         let (id, browser) = create_webview(app, validate_url(DEFAULT_URL)?, true, None)?;
-        wait_for_page_load(&id, &browser, 0).await?;
+        if let Err(error) = wait_for_page_load(&id, &browser, 0).await {
+            let _ = close(app, Some(id));
+            return Err(error);
+        }
         let status = status_for(&id, Some(browser));
         let _ = app.emit_to("main", STATUS_EVENT, status.clone());
         Ok(status)
@@ -634,7 +722,7 @@ mod platform {
             browsers.remove(&id);
             browsers
                 .iter()
-                .max_by_key(|(_, meta)| meta.order)
+                .max_by_key(|(_, meta)| meta.z_order)
                 .map(|(id, _)| id.clone())
         } else {
             None
@@ -1123,9 +1211,11 @@ mod platform {
               const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
               if (!setter) return {{ok:false,error:'not_editable'}};
               setter.call(el, matching[0].value); selectedLabel = clean(matching[0].textContent);
+              if (el.value !== matching[0].value) return {{ok:false,error:'value_rejected'}};
             }} else if (el.isContentEditable) {{ el.textContent = value; }} else {{
               const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
               const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set; if (!setter) return {{ok:false,error:'not_editable'}}; setter.call(el, value);
+              if (el.value !== value) return {{ok:false,error:'value_rejected'}};
             }}
             el.dispatchEvent(new InputEvent('input', {{bubbles:true,inputType:'insertText',data:null}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); state.refs.clear(); return {{ok:true,kind:'type',label:label(el),selectedLabel}};"#
         );

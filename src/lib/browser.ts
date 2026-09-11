@@ -237,6 +237,11 @@ const negationWords =
 
 const utteranceHasNegation = (utterance: string) => negationWords.test(utterance)
 
+const typingWords =
+	/(入力|記入|タイプ|書き込|貼り付け|ペースト|セット|設定|埋め|記載|打ち込|書いて|入れて|\b(?:type|enter|fill|write|paste|set)\b)/i
+
+const closeWords = /(閉じて|閉じる|終了して|終了する|\bclose\b)/i
+
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
@@ -475,11 +480,16 @@ export class BrowserToolRunner {
 			explicit = Boolean(
 				element?.label &&
 					!utteranceHasNegation(this.utterance) &&
+					typingWords.test(this.utterance) &&
 					utteranceContains(this.utterance, element.label) &&
 					utteranceContains(this.utterance, value),
 			)
 			description = `${element?.label || 'フォーム'}へ文字を入力します。入力により自動保存・送信される可能性があります。`
 			detail = value.length > 120 ? `${value.slice(0, 120)}…` : value
+		} else if (operation === 'close') {
+			explicit = !utteranceHasNegation(this.utterance) && closeWords.test(this.utterance)
+			description = '表示中のJARVIS内ブラウザを閉じます。未保存の入力内容が失われる可能性があります。'
+			detail = this.snapshot?.url
 		} else if (operation === 'click') {
 			const reference = textArg(args, 'reference')
 			const element = this.element(reference)

@@ -20,6 +20,7 @@ export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onErr
 	useEffect(() => {
 		let disposed = false
 		let unlisten: (() => void) | undefined
+		let unlistenActivated: (() => void) | undefined
 		void browserRequest<BrowserStatus[]>('list')
 			.then(value => { if (!disposed) setWindows(value.filter(window => window.open)) })
 			.catch(error => onError(String(error)))
@@ -29,9 +30,21 @@ export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onErr
 			if (disposed) remove()
 			else unlisten = remove
 		})
+		void listen<string>('managed-browser-activated', event => {
+			if (!disposed) {
+				setWindows(current => {
+					const selected = current.find(window => window.id === event.payload)
+					return selected ? [...current.filter(window => window.id !== event.payload), selected] : current
+				})
+			}
+		}).then(remove => {
+			if (disposed) remove()
+			else unlistenActivated = remove
+		})
 		return () => {
 			disposed = true
 			unlisten?.()
+			unlistenActivated?.()
 		}
 	}, [onError])
 

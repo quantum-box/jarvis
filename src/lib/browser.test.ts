@@ -195,6 +195,18 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
 	})
 
+	it('requires positive typing intent before bypassing approval', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-ambiguous-type'))
+		await f.runner.settled()
+		f.runner.setUserUtterance('検索結果を見せて')
+		f.runner.handle(done('browser_type', { reference: 'e3-3', text: '結果' }, 'ambiguous-type'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
 	it('allows exactly stated form text and verifies with a fresh snapshot', async () => {
 		const f = fixture()
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot'))
@@ -239,6 +251,25 @@ describe('BrowserToolRunner', () => {
 			operation: 'type',
 			args: { reference: 'e3-3', text: '' },
 		})
+	})
+
+	it('requires approval when the user did not ask to close the browser', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('ページを見せて')
+		f.runner.handle(done('browser_close', {}, 'ambiguous-close'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
+
+	it('allows an explicit positive request to close the browser', async () => {
+		const f = fixture()
+		f.runner.setUserUtterance('ブラウザを閉じて')
+		f.runner.handle(done('browser_close', {}, 'explicit-close'))
+		await f.runner.settled()
+		expect(f.approve).not.toHaveBeenCalled()
+		expect(f.operations.map(item => item.operation)).toEqual(['close'])
 	})
 
 	it('does not authorize query data on a cross-origin link from a hostname mention', async () => {
