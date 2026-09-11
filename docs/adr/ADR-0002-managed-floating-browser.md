@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-09-11)
+Accepted (2026-09-11, in-app windowへ改訂)
 
 関連issue: [PLT-4566](https://linear.app/issue/PLT-4566)
 
@@ -14,7 +14,9 @@ JARVISの音声対話からWeb上の情報を探し、ページを読み、ユ�
 
 ## Decision
 
-- macOS版に、JARVISがライフサイクルを管理する単一のフローティングブラウザを追加する。Tauriの`WebviewWindow`で外部URLを表示し、JARVIS本体の近くに配置して最前面表示を選べるようにする。ブラウザを閉じてもWebデータはJARVIS専用の永続プロファイルに保持する。
+- macOS版に、JARVISがライフサイクルを管理する単一のアプリ内仮想ブラウザを追加する。JARVIS本体と別のOSウィンドウは作らず、メインのTauri `Window`に外部URL用のchild `Webview`を追加する。
+- JARVIS本体のReact UIでタイトルバー、origin表示、戻る、進む、最小化、閉じる、ドラッグ移動、リサイズを持つソフトウェアウィンドウを描画する。child `Webview`はその本文領域だけに配置し、位置とサイズをhost側のboundsへ同期する。仮想ウィンドウはJARVISの表示領域外へ移動できないようにする。
+- 最小化ではchild `Webview`を非表示にしてセッションを保持し、閉じる場合だけ破棄する。ブラウザを閉じてもWebデータはJARVIS専用の永続プロファイルに保持する。
 - 外部ページを読み込むWebViewにはTauri IPCとローカルcapabilityを付与しない。ページからJARVISのコマンドを呼び出す経路は作らず、JARVIS本体からRustが保持するブラウザハンドルを操作する。DOM操作の結果は、ホストが開始したTauri 2.11.5の`eval_with_callback`だけでRustへ返す。ページ側が任意のメッセージを送れるhandlerや公開callbackは追加しない。
 - ナビゲーションは`https`を既定とし、`file`、`data`、`javascript`、Tauriのカスタムschemeを拒否する。開発時の明示操作に限りlocalhostの`http`を許可する。新規ウィンドウ、ダウンロード、ファイル選択は個別のユーザー操作として扱う。
 - 音声AIへ`browser_open`、`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_scroll`、`browser_back`、`browser_forward`、`browser_close`をローカルfunction toolsとして提供する。座標ではなく、`browser_snapshot`が返す短命な参照IDで要素を指定する。参照IDはURL、origin、DOM revision、要素のrole・label・type・hrefを含むfingerprintへ結び付ける。`MutationObserver`による関連DOM変更、ページ遷移、次のsnapshot、または実行時fingerprint不一致で失効させる。`href`を持つリンクはページのclick handlerを実行せず、snapshot時に解決したURLをhost側のnavigation policyへ渡す。それ以外のclickは、DOMに現れないevent listenerの差し替えを検出できないため、参照が有効でも実行時に毎回ローカル許可を取り直す。
@@ -24,13 +26,14 @@ JARVISの音声対話からWeb上の情報を探し、ページを読み、ユ�
 - ChromeからのCookieインポートは、ユーザーが設定画面から開始する一回限りのローカル操作とする。Chromeプロファイルと対象ドメインを選択し、ChromeのCookie DBを読み取り専用の一時コピーから解析する。必要な復号鍵はmacOS Keychainへ明示的にアクセスし、復号したCookieはJARVISのWebView cookie storeへ直接設定する。
 - Cookieの値、復号鍵、Chrome DBのコピーを永続ログ、Frontend state、AIモデル、Tachyonへ送らない。UIにはプロファイル名、ドメイン、件数、有効期限、成功・再ログイン必要の結果だけを表示する。自動同期は行わず、再インポートもユーザーが開始する。
 - Cookieの削除とサイト単位のWebデータ削除をJARVISの設定から実行できるようにする。パスワード、履歴、ブックマーク、拡張機能、決済情報はインポート対象外とする。
-- 初期対象はmacOS 14以降、単一ブラウザウィンドウ、単一プロファイルとする。複数タブ、ダウンロード、ブラウザ拡張、他OSは別の判断とする。
+- 初期対象はmacOS 14以降、単一のアプリ内仮想ブラウザ、単一プロファイルとする。複数タブ、アプリ外への分離、ダウンロード、ブラウザ拡張、他OSは別の判断とする。
 
 ## Consequences
 
 ### Positive
 
 - 音声対話、ページ表示、AIによる操作結果をJARVIS内の一つの体験として扱える。
+- ブラウザがJARVISの会話画面から離れず、同じアプリ内で移動、縮小、再表示できる。
 - DOM由来の参照IDを使うため、外部ブラウザを座標やAccessibilityだけで操作するより対象と結果を確認しやすい。
 - Chromeの選択したログイン状態を移行でき、初回利用時の再ログインを減らせる。
 - 認証情報と外部コンテンツをローカルtool境界の内側に保ち、AIへ渡す情報を限定できる。
@@ -41,6 +44,7 @@ JARVISの音声対話からWeb上の情報を探し、ページを読み、ユ�
 - macOS Keychainへのアクセス時にユーザー確認が表示される。Chromeの実行中や権限状態によってはインポートできない場合がある。
 - device-bound session、passkey、クライアント証明書、partitioned cookieなどは完全に移行できず、サイトによって再ログインが必要になる。
 - WKWebViewとChromeで挙動が異なるサイトがあり、拡張機能、DRM、複雑なダウンロードは初期版で扱えない。
+- native child `Webview`はReact DOMより前面に描画されるため、ソフトウェアウィンドウの操作部と外部ページの表示領域を重ねずに配置し、boundsを同期する必要がある。
 
 ## Alternatives Considered
 
@@ -52,6 +56,10 @@ JARVISの音声対話からWeb上の情報を探し、ページを読み、ユ�
 
 `frame-ancestors`や`X-Frame-Options`で表示できないサイトが多く、JARVIS本体と外部コンテンツの権限境界も複雑になるため採用しない。
 
+### 独立したWebviewWindowをJARVISの隣に表示する
+
+外部ページとの権限分離は単純になるが、macOS上で別ウィンドウとして扱われ、会話とページを一つの作業面として操作できない。ユーザーが求めるソフトウェアウィンドウの体験にならないため採用しない。
+
 ### Chromiumをアプリへ同梱する
 
 Chromeとの互換性は高いが、配布サイズ、更新、脆弱性対応、署名の負担が大きい。WKWebViewで対応できない対象が明確になった時点で再評価する。
@@ -62,14 +70,16 @@ Chromeとの互換性は高いが、配布サイズ、更新、脆弱性対応�
 
 ## Follow-up
 
-- フローティング`WebviewWindow`と手動操作UIを実装し、外部ページにTauri IPCがないことを確認する。
+- メイン`Window`上のchild `Webview`と仮想ウィンドウUIを実装し、外部ページにTauri IPCがないことを確認する。
+- ドラッグ、リサイズ、最小化、復元、親ウィンドウresize時のbounds制約をmacOS実機で確認する。
 - 参照IDベースのbrowser toolsと操作結果確認を実装する。
 - Chromeプロファイル・ドメイン選択、Keychain復号、WebView cookie storeへのインポートを実装する。
 - ログイン済みサイト、Cookie削除、再起動後の保持、prompt injectionを含むmacOS実機検証を行う。
 
 ## References
 
-- [Tauri WebviewWindowBuilder](https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html)
-- [Tauri Webview cookie APIs](https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindow.html)
+- [Tauri Window::add_child](https://docs.rs/tauri/latest/tauri/window/struct.Window.html#method.add_child)
+- [Tauri WebviewBuilder](https://docs.rs/tauri/latest/tauri/webview/struct.WebviewBuilder.html)
+- [Tauri Webview APIs](https://docs.rs/tauri/latest/tauri/webview/struct.Webview.html)
 - [Apple WKHTTPCookieStore](https://developer.apple.com/documentation/webkit/wkhttpcookiestore)
 - [Chromium KeychainPassword for macOS](https://chromium.googlesource.com/chromium/src/+/HEAD/components/os_crypt/common/keychain_password_mac.mm)
