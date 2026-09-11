@@ -14,15 +14,21 @@ pub struct BrowserStatus {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    };
     use std::time::Duration;
     use tauri::{
-        webview::NewWindowResponse, Manager, Runtime, WebviewUrl, WebviewWindow,
-        WebviewWindowBuilder,
+        webview::{NewWindowResponse, PageLoadEvent},
+        Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     };
     use tokio::sync::oneshot;
 
     const LABEL: &str = "managed-browser";
     const DEFAULT_URL: &str = "https://www.google.com/";
+    static FINISHED_PAGE_LOADS: AtomicU64 = AtomicU64::new(0);
+    static FINISHED_PAGE_URL: Mutex<String> = Mutex::new(String::new());
 
     fn validate_url(value: &str) -> Result<tauri::Url, String> {
         let url = tauri::Url::parse(value).map_err(|_| "URLが正しくありません。".to_string())?;
@@ -47,6 +53,15 @@ mod platform {
         safe.set_query(None);
         safe.set_fragment(None);
         safe.to_string()
+    }
+
+    fn fragment_only_navigation(current: &tauri::Url, target: &tauri::Url) -> bool {
+        current.scheme() == target.scheme()
+            && current.host_str() == target.host_str()
+            && current.port_or_known_default() == target.port_or_known_default()
+            && current.path() == target.path()
+            && current.query() == target.query()
+            && current.fragment() != target.fragment()
     }
 
     fn create_window(
@@ -74,6 +89,14 @@ mod platform {
             .on_navigation(|candidate| validate_url(candidate.as_str()).is_ok())
             .on_new_window(|_, _| NewWindowResponse::Deny)
             .on_download(|_, _| false)
+            .on_page_load(|_, payload| {
+                if payload.event() == PageLoadEvent::Finished {
+                    if let Ok(mut url) = FINISHED_PAGE_URL.lock() {
+                        *url = payload.url().to_string();
+                    }
+                    FINISHED_PAGE_LOADS.fetch_add(1, Ordering::Release);
+                }
+            })
             .on_document_title_changed(|browser, title| {
                 let clean: String = title
                     .chars()
@@ -110,13 +133,66 @@ mod platform {
         create_window(app, validate_url(DEFAULT_URL)?, true, visible)
     }
 
-    pub fn open(
+    async fn wait_for_page_load(browser: &WebviewWindow, start: u64) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if FINISHED_PAGE_LOADS.load(Ordering::Acquire) > start {
+                    let finished = FINISHED_PAGE_URL.lock().ok().map(|url| url.clone());
+                    let current = browser.url().ok().map(|url| url.to_string());
+                    if finished.is_some() && finished == current {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| "ページの読み込みがタイムアウトしました。".to_string())
+    }
+
+    async fn wait_for_history_navigation(
+        browser: &WebviewWindow,
+        start: u64,
+        previous_url: Option<String>,
+    ) -> Result<(), String> {
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let current = browser.url().ok().map(|url| url.to_string());
+                if FINISHED_PAGE_LOADS.load(Ordering::Acquire) > start {
+                    let finished = FINISHED_PAGE_URL.lock().ok().map(|url| url.clone());
+                    if finished.is_some() && finished == current {
+                        break;
+                    }
+                }
+                if current != previous_url {
+                    let ready = eval(browser, "document.readyState".into()).await.ok();
+                    if ready == Some(Value::String("complete".into())) {
+                        break;
+                    }
+                } else if started.elapsed() >= Duration::from_millis(750) {
+                    // history.back()/forward() is a no-op at the edge of the list.
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| "ページの読み込みがタイムアウトしました。".to_string())
+    }
+
+    pub async fn open(
         app: &AppHandle,
         url: Option<String>,
         always_on_top: bool,
     ) -> Result<BrowserStatus, String> {
         let target = validate_url(url.as_deref().unwrap_or(DEFAULT_URL))?;
+        let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
         let browser = if let Some(browser) = app.get_webview_window(LABEL) {
+            let fragment_only = browser
+                .url()
+                .ok()
+                .is_some_and(|current| fragment_only_navigation(&current, &target));
             browser
                 .navigate(target)
                 .map_err(|_| "ページを開けませんでした。".to_string())?;
@@ -127,18 +203,32 @@ mod platform {
                 .show()
                 .map_err(|_| "ブラウザを表示できませんでした。".to_string())?;
             let _ = browser.set_focus();
+            if !fragment_only {
+                wait_for_page_load(&browser, load_start).await?;
+            }
             browser
         } else {
-            create_window(app, target, always_on_top, true)?
+            let browser = create_window(app, target, always_on_top, true)?;
+            wait_for_page_load(&browser, load_start).await?;
+            browser
         };
         status_for(Some(browser))
     }
 
-    pub fn navigate(app: &AppHandle, url: String) -> Result<BrowserStatus, String> {
+    pub async fn navigate(app: &AppHandle, url: String) -> Result<BrowserStatus, String> {
         let browser = window(app)?;
+        let target = validate_url(&url)?;
+        let fragment_only = browser
+            .url()
+            .ok()
+            .is_some_and(|current| fragment_only_navigation(&current, &target));
+        let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
         browser
-            .navigate(validate_url(&url)?)
+            .navigate(target)
             .map_err(|_| "ページを開けませんでした。".to_string())?;
+        if !fragment_only {
+            wait_for_page_load(&browser, load_start).await?;
+        }
         status_for(Some(browser))
     }
 
@@ -205,7 +295,11 @@ mod platform {
       const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
       const visible = el => {
         const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+      };
+      const visibleText = node => {
+        const range = document.createRange(); range.selectNodeContents(node);
+        return [...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth);
       };
       const role = el => el.getAttribute('role') || (el.isContentEditable ? 'textbox' : ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase()));
       const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
@@ -231,11 +325,21 @@ mod platform {
       const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
       const text = []; let size = 0; let node;
       while ((node = walker.nextNode()) && size < 6000) {
-        if (excluded(node.parentElement) || !visible(node.parentElement)) continue;
+        if (excluded(node.parentElement) || !visibleText(node)) continue;
         const value = clean(node.nodeValue); if (!value) continue;
         text.push(value); size += value.length + 1;
       }
-      state.observer = new MutationObserver(() => { state.revision += 1; state.refs.clear(); });
+      state.observer = new MutationObserver(mutations => {
+        for (const [ref, entry] of state.refs) {
+          const affected = mutations.some(mutation => {
+            const el = entry.el; const target = mutation.target;
+            if (mutation.type === 'attributes') return target === el || target.contains?.(el);
+            if (mutation.type === 'characterData') return el.contains(target);
+            return target === el || el.contains(target) || [...mutation.removedNodes].some(node => node === el || node.contains?.(el));
+          });
+          if (affected) state.refs.delete(ref);
+        }
+      });
       state.observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,characterData:true});
       return {title:clean(document.title).slice(0,200),url:location.origin,origin:location.origin,revision:state.revision,text:text.join('\n').slice(0,6000),elements};
     })()"#;
@@ -251,7 +355,8 @@ mod platform {
               const valueControl = el => el.matches('input,textarea,select,[contenteditable="true"]');
               const label = el => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || (valueControl(el) ? '' : el.innerText)).slice(0,180);
               const fingerprint = el => JSON.stringify({{tag:el.tagName,role:role(el),label:label(el),type:el.getAttribute('type') || '',href:el.href || ''}});
-              if (!entry.el?.isConnected || fingerprint(entry.el) !== entry.fingerprint) return {{ok:false,error:'stale_reference'}};
+              const visible = el => {{ const style = getComputedStyle(el); const rect = el.getBoundingClientRect(); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth; }};
+              if (!entry.el?.isConnected || !visible(entry.el) || fingerprint(entry.el) !== entry.fingerprint) return {{ok:false,error:'stale_reference'}};
               {action}
             }})()"#
         )
@@ -283,9 +388,17 @@ mod platform {
             let destination_origin = safe_url_summary(&target);
             let destination_has_payload =
                 target.path() != "/" || target.query().is_some() || target.fragment().is_some();
+            let fragment_only = browser
+                .url()
+                .ok()
+                .is_some_and(|current| fragment_only_navigation(&current, &target));
+            let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
             browser
                 .navigate(target)
                 .map_err(|_| "リンク先を開けませんでした。".to_string())?;
+            if !fragment_only {
+                wait_for_page_load(&browser, load_start).await?;
+            }
             if let Some(object) = result.as_object_mut() {
                 object.remove("href");
                 object.insert(
@@ -312,7 +425,9 @@ mod platform {
         let value =
             serde_json::to_string(&text).map_err(|_| "入力を処理できません。".to_string())?;
         let action = format!(
-            r#"const el = entry.el; const value = {value}; el.focus();
+            r#"const el = entry.el; const value = {value};
+            if (el.matches(':disabled') || (!el.isContentEditable && Boolean(el.readOnly))) return {{ok:false,error:'not_editable'}};
+            el.focus();
             if (el.isContentEditable) {{ el.textContent = value; }} else {{
               const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
               const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set; if (!setter) return {{ok:false,error:'not_editable'}}; setter.call(el, value);
@@ -336,16 +451,21 @@ mod platform {
     }
 
     pub async fn history(app: &AppHandle, forward: bool) -> Result<Value, String> {
+        let browser = window(app)?;
+        let previous_url = browser.url().ok().map(|url| url.to_string());
         let command = if forward {
             "history.forward()"
         } else {
             "history.back()"
         };
-        eval(
-            &window(app)?,
+        let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
+        let result = eval(
+            &browser,
             format!("(() => {{ const state = globalThis.__jarvisManagedBrowserV1; if (state) {{ state.revision += 1; state.refs.clear(); }} {command}; return {{ok:true}}; }})()"),
         )
-        .await
+        .await?;
+        wait_for_history_navigation(&browser, load_start, previous_url).await?;
+        Ok(result)
     }
 
     pub async fn clear_current_storage(app: &AppHandle, domain: &str) -> Result<bool, String> {
@@ -391,7 +511,7 @@ pub async fn browser_open(
 ) -> Result<BrowserStatus, String> {
     #[cfg(target_os = "macos")]
     {
-        platform::open(&app, url, always_on_top.unwrap_or(true))
+        platform::open(&app, url, always_on_top.unwrap_or(true)).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -403,7 +523,7 @@ pub async fn browser_open(
 #[tauri::command]
 pub async fn browser_navigate(app: AppHandle, url: String) -> Result<BrowserStatus, String> {
     #[cfg(target_os = "macos")]
-    return platform::navigate(&app, url);
+    return platform::navigate(&app, url).await;
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, url);

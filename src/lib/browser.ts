@@ -178,6 +178,14 @@ const textArg = (args: Record<string, unknown>, key: string) => {
 	return value
 }
 
+const stringArg = (args: Record<string, unknown>, key: string) => {
+	const value = args[key]
+	if (typeof value !== 'string') {
+		throw new Error(`ブラウザ操作の${key}が正しくありません。`)
+	}
+	return value
+}
+
 const normalized = (value: string) =>
 	value.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '')
 
@@ -190,6 +198,7 @@ const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
 		return (
+			url.pathname === '/' &&
 			!url.search &&
 			!url.hash &&
 			utteranceContains(utterance, url.hostname)
@@ -363,9 +372,10 @@ export class BrowserToolRunner {
 					break
 				}
 				case 'type': {
+					const text = stringArg(args, 'text')
 					output = await this.request('type', {
 						reference: textArg(args, 'reference'),
-						text: textArg(args, 'text'),
+						text,
 					})
 					this.snapshot = null
 					const after = await this.request<BrowserSnapshot>('snapshot')
@@ -419,7 +429,7 @@ export class BrowserToolRunner {
 			detail = url
 		} else if (operation === 'type') {
 			const element = this.element(textArg(args, 'reference'))
-			const value = textArg(args, 'text')
+			const value = stringArg(args, 'text')
 			explicit = Boolean(
 				element?.label &&
 					utteranceContains(this.utterance, element.label) &&

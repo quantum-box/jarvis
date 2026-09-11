@@ -268,15 +268,14 @@ mod platform {
             "''"
         };
         let sql = format!(
-            "SELECT host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,has_expires,samesite,{partition} FROM cookies WHERE host_key = ?1 OR host_key = ?2 OR host_key LIKE ?3"
+            "SELECT host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,has_expires,samesite,{partition} FROM cookies WHERE host_key = ?1 OR host_key = ?2 OR substr(host_key, -length(?2)) = ?2"
         );
         let mut statement = connection
             .prepare(&sql)
             .map_err(|_| "ChromeのCookieデータ形式を読み取れませんでした。".to_string())?;
         let dotted = format!(".{domain}");
-        let suffix = format!("%.{domain}");
         let rows = statement
-            .query_map([domain, dotted.as_str(), suffix.as_str()], |row| {
+            .query_map([domain, dotted.as_str()], |row| {
                 Ok(CookieRow {
                     host: row.get(0)?,
                     name: row.get(1)?,
@@ -293,6 +292,17 @@ mod platform {
             })
             .map_err(|_| "ChromeのCookieデータを読み取れませんでした。".to_string())?;
         Ok(rows.flatten().collect())
+    }
+
+    #[cfg(test)]
+    pub(super) fn matching_hosts_for_test(
+        connection: &Connection,
+        domain: &str,
+    ) -> Result<Vec<String>, String> {
+        Ok(read_rows(connection, domain)?
+            .into_iter()
+            .map(|row| row.host)
+            .collect())
     }
 
     fn set_cookie(browser: &WebviewWindow, row: &CookieRow, value: &str) -> Result<(), String> {
@@ -464,7 +474,9 @@ pub async fn clear_browser_site_data(
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::platform::{database_version, decrypt_value, normalize_domain};
+    use super::platform::{
+        database_version, decrypt_value, matching_hosts_for_test, normalize_domain,
+    };
     use aes::Aes128;
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
     use rusqlite::Connection;
@@ -492,6 +504,28 @@ mod tests {
             .execute("INSERT INTO meta VALUES ('version', '24')", [])
             .unwrap();
         assert_eq!(database_version(&connection), 24);
+    }
+
+    #[test]
+    fn treats_cookie_domain_underscores_as_literals() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cookies (
+                    host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB,
+                    path TEXT, expires_utc INTEGER, is_secure INTEGER,
+                    is_httponly INTEGER, has_expires INTEGER, samesite INTEGER
+                );
+                INSERT INTO cookies VALUES
+                    ('foo_bar.com','a','v',x'','/',0,0,0,0,0),
+                    ('.sub.foo_bar.com','b','v',x'','/',0,0,0,0,0),
+                    ('fooXbar.com','c','v',x'','/',0,0,0,0,0);",
+            )
+            .unwrap();
+
+        let mut hosts = matching_hosts_for_test(&connection, "foo_bar.com").unwrap();
+        hosts.sort();
+        assert_eq!(hosts, [".sub.foo_bar.com", "foo_bar.com"]);
     }
 
     #[test]

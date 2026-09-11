@@ -132,6 +132,30 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations).toEqual([])
 	})
 
+	it('does not authorize a model-invented path from a hostname mention', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('example.comを開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/delete-account' }, 'path-nav'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
+
+	it('can clear an editable field after local approval', async () => {
+		const approve = vi.fn(async () => true)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-clear'))
+		await f.runner.settled()
+		f.runner.handle(done('browser_type', { reference: 'e3-3', text: '' }, 'clear'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toContainEqual({
+			operation: 'type',
+			args: { reference: 'e3-3', text: '' },
+		})
+	})
+
 	it('does not authorize query data on a cross-origin link from a hostname mention', async () => {
 		const approve = vi.fn(async () => false)
 		const withQuery = {
