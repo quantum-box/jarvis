@@ -20,6 +20,7 @@ export class UpdateController {
   private update: Update | null = null;
   private listeners = new Set<() => void>();
   private initialized = false;
+  private initialization: Promise<void> | null = null;
   private enabled = false;
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => {
@@ -33,8 +34,12 @@ export class UpdateController {
   get blocksConversation() {
     return ['downloading', 'installing', 'installed', 'restarting'].includes(this.state.phase);
   }
-  async initialize() {
-    if (this.initialized) return;
+  initialize() {
+    if (this.initialization) return this.initialization;
+    this.initialization = this.initializeOnce();
+    return this.initialization;
+  }
+  private async initializeOnce() {
     this.initialized = true;
     if (!isTauri()) { this.set({ phase: 'browser' }); return; }
     try {
@@ -45,6 +50,7 @@ export class UpdateController {
       if (this.enabled) await this.check();
     } catch {
       this.initialized = false;
+      this.initialization = null;
       this.set({ phase: 'error', error: '更新機能を初期化できませんでした。もう一度確認してください。' });
     }
   }
