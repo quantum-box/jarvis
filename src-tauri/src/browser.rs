@@ -43,6 +43,7 @@ mod platform {
     const LABEL_PREFIX: &str = "managed-browser";
     const STATUS_EVENT: &str = "managed-browser-status";
     const DEFAULT_URL: &str = "https://www.google.com/";
+    const BLANK_URL: &str = "about:blank";
     const FRAME_TOP: f64 = 92.0;
     const FRAME_MARGIN: f64 = 16.0;
     const FRAME_BORDER: f64 = 7.0;
@@ -89,6 +90,15 @@ mod platform {
             return Err("認証情報を含むURLは開けません。".into());
         }
         Ok(url)
+    }
+
+    fn blank_url() -> Result<tauri::Url, String> {
+        tauri::Url::parse(BLANK_URL)
+            .map_err(|_| "ブラウザの初期ページを作成できませんでした。".to_string())
+    }
+
+    fn is_blank_url(url: &tauri::Url) -> bool {
+        url.as_str() == BLANK_URL
     }
 
     fn active_id() -> Option<String> {
@@ -299,7 +309,9 @@ mod platform {
         let title_id = id.clone();
         let builder = WebviewBuilder::new(&id, WebviewUrl::External(url))
             .data_directory(data_dir)
-            .on_navigation(|candidate| validate_url(candidate.as_str()).is_ok())
+            .on_navigation(|candidate| {
+                is_blank_url(candidate) || validate_url(candidate.as_str()).is_ok()
+            })
             .on_new_window(|_, _| NewWindowResponse::Deny)
             .on_download(|_, _| false)
             .on_page_load(move |_, payload| {
@@ -386,7 +398,7 @@ mod platform {
             }
             return Ok(browser);
         }
-        create_webview(app, validate_url(DEFAULT_URL)?, visible, None).map(|(_, browser)| browser)
+        create_webview(app, blank_url()?, visible, None).map(|(_, browser)| browser)
     }
 
     async fn wait_for_page_load(id: &str, browser: &Webview, start: u64) -> Result<(), String> {
@@ -446,12 +458,54 @@ mod platform {
         .map_err(|_| "ページの読み込みがタイムアウトしました。".to_string())
     }
 
+    async fn wait_for_possible_navigation(
+        id: &str,
+        browser: &Webview,
+        start: u64,
+        previous_url: Option<String>,
+    ) -> Result<(), String> {
+        let detection_deadline = tokio::time::Instant::now() + Duration::from_millis(1200);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let current = browser.url().ok().map(|url| url.to_string());
+                let finished = browsers().lock().ok().and_then(|browsers| {
+                    browsers
+                        .get(id)
+                        .map(|meta| (meta.finished_page_loads, meta.finished_page_url.clone()))
+                });
+                if let Some((_, finished)) = finished.filter(|(loads, _)| *loads > start) {
+                    if Some(finished) == current {
+                        break;
+                    }
+                }
+                if current != previous_url {
+                    let ready = eval(browser, "document.readyState".into()).await.ok();
+                    if ready == Some(Value::String("complete".into())) {
+                        break;
+                    }
+                } else if tokio::time::Instant::now() >= detection_deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| "ページの読み込みがタイムアウトしました。".to_string())
+    }
+
     pub async fn open(
         app: &AppHandle,
         url: Option<String>,
         bounds: Option<BrowserBounds>,
     ) -> Result<BrowserStatus, String> {
         let (id, browser) = if let Ok((id, browser)) = webview(app) {
+            let url = url.or_else(|| {
+                browser
+                    .url()
+                    .ok()
+                    .filter(is_blank_url)
+                    .map(|_| DEFAULT_URL.to_string())
+            });
             if let Some(url) = url {
                 let target = validate_url(&url)?;
                 let fragment_only = browser
@@ -829,6 +883,8 @@ mod platform {
 
     pub async fn click(app: &AppHandle, reference: String) -> Result<Value, String> {
         let (id, browser) = webview(app)?;
+        let previous_url = browser.url().ok().map(|url| url.to_string());
+        let load_start = page_load_count(&id);
         let mut result = eval(
             &browser,
             ref_script(
@@ -853,7 +909,6 @@ mod platform {
                 .url()
                 .ok()
                 .is_some_and(|current| fragment_only_navigation(&current, &target));
-            let load_start = page_load_count(&id);
             browser
                 .navigate(target)
                 .map_err(|_| "リンク先を開けませんでした。".to_string())?;
@@ -871,6 +926,8 @@ mod platform {
                     Value::Bool(destination_has_payload),
                 );
             }
+        } else if result.get("kind").and_then(Value::as_str) == Some("click") {
+            wait_for_possible_navigation(&id, &browser, load_start, previous_url).await?;
         }
         Ok(result)
     }
@@ -880,14 +937,15 @@ mod platform {
         reference: String,
         text: String,
     ) -> Result<Value, String> {
-        if text.len() > 20_000 {
+        if text.chars().count() > 20_000 {
             return Err("入力できる文字数を超えています。".into());
         }
         let value =
             serde_json::to_string(&text).map_err(|_| "入力を処理できません。".to_string())?;
         let action = format!(
             r#"const el = entry.el; const value = {value};
-            if (el.matches(':disabled') || (!el.isContentEditable && Boolean(el.readOnly))) return {{ok:false,error:'not_editable'}};
+            const textInput = el.isContentEditable || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(el.type));
+            if (!textInput || el.matches(':disabled') || (!el.isContentEditable && Boolean(el.readOnly))) return {{ok:false,error:'not_editable'}};
             el.focus();
             if (el.isContentEditable) {{ el.textContent = value; }} else {{
               const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;

@@ -215,6 +215,15 @@ const utteranceContains = (utterance: string, value: string) => {
 	return needle.length >= 2 && normalized(utterance).includes(needle)
 }
 
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const utteranceNamesHostname = (utterance: string, hostname: string) => {
+	const haystack = utterance.normalize('NFKC').toLocaleLowerCase()
+	const needle = hostname.normalize('NFKC').toLocaleLowerCase()
+	if (!needle) return false
+	return new RegExp(`(^|[^a-z0-9.-])${escapeRegExp(needle)}([^a-z0-9.-]|$)`, 'i').test(haystack)
+}
+
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
@@ -222,15 +231,13 @@ const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 			url.pathname === '/' &&
 			!url.search &&
 			!url.hash &&
-			utteranceContains(utterance, url.hostname)
+			utteranceNamesHostname(utterance, url.hostname)
 		)
 	} catch {
 		return false
 	}
 }
 
-const actionWords =
-	/(クリック|押して|開いて|進んで|選んで|送信|投稿|購入|注文|削除|許可|確定|保存|支払|click|open|choose|send|submit|post|buy|order|delete|allow|confirm|save|pay)/i
 const consequentialWords =
 	/(送信|投稿|購入|注文|削除|許可|確定|保存|支払|send|submit|post|buy|order|delete|allow|confirm|save|pay)/i
 
@@ -463,9 +470,11 @@ export class BrowserToolRunner {
 				const sameOrigin = this.snapshot
 					? element.hrefOrigin === this.snapshot.origin
 					: false
+				const consequential = consequentialWords.test(element.label)
 				explicit =
-					sameOrigin ||
-					(!element.hrefHasPayload &&
+					!consequential &&
+					!element.hrefHasPayload &&
+					(sameOrigin ||
 						explicitlyNamesPlainDestination(
 							this.utterance,
 							element.hrefOrigin,
@@ -476,9 +485,7 @@ export class BrowserToolRunner {
 					: element.hrefOrigin
 			} else {
 				const label = element?.label || 'ページ上の操作'
-				const labelExplicit = utteranceContains(this.utterance, label)
-				const consequential = consequentialWords.test(label)
-				explicit = !consequential && labelExplicit && actionWords.test(this.utterance)
+				explicit = false
 				description = `${label}を実行します。ページのeventを発火する操作です。`
 				detail = this.snapshot?.url
 			}

@@ -169,10 +169,16 @@ mod platform {
         }
         for suffix in ["-wal", "-shm"] {
             let source_sidecar = PathBuf::from(format!("{}{suffix}", source.display()));
-            if source_sidecar.is_file() {
-                let _ = fs::copy(
+            if source_sidecar.is_file()
+                && fs::copy(
                     source_sidecar,
                     PathBuf::from(format!("{}{suffix}", target.display())),
+                )
+                .is_err()
+            {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(
+                    "ChromeのCookie更新データを読み取り用にコピーできませんでした。".into(),
                 );
             }
         }
@@ -296,7 +302,8 @@ mod platform {
                 })
             })
             .map_err(|_| "ChromeのCookieデータを読み取れませんでした。".to_string())?;
-        Ok(rows.flatten().collect())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "ChromeのCookie行を読み取れませんでした。".to_string())
     }
 
     #[cfg(test)]
@@ -539,6 +546,24 @@ mod tests {
         let mut hosts = matching_hosts_for_test(&connection, "foo_bar.com").unwrap();
         hosts.sort();
         assert_eq!(hosts, [".sub.foo_bar.com", "foo_bar.com"]);
+    }
+
+    #[test]
+    fn reports_malformed_cookie_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cookies (
+                    host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB,
+                    path TEXT, expires_utc INTEGER, is_secure INTEGER,
+                    is_httponly INTEGER, has_expires INTEGER, samesite INTEGER
+                );
+                INSERT INTO cookies VALUES
+                    ('example.com',NULL,'v',x'','/',0,0,0,0,0);",
+            )
+            .unwrap();
+
+        assert!(matching_hosts_for_test(&connection, "example.com").is_err());
     }
 
     #[test]

@@ -89,14 +89,40 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations.map(entry => entry.operation)).toEqual(['snapshot'])
 	})
 
-	it('follows a same-origin snapshot link without dispatching a new approval', async () => {
+	it('requires approval for a same-origin link with a path', async () => {
 		const f = fixture()
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot'))
 		await f.runner.settled()
 		f.runner.handle(done('browser_click', { reference: 'e3-1' }, 'click'))
 		await f.runner.settled()
-		expect(f.approve).not.toHaveBeenCalled()
-		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'click'])
+		expect(f.approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
+	it('requires approval for a consequential same-origin root link', async () => {
+		const approve = vi.fn(async () => false)
+		const risky = {
+			...snapshot,
+			elements: [{ ref: 'e3-risk', role: 'link', label: 'アカウントを削除', hrefOrigin: snapshot.origin, hrefHasPayload: false }],
+		}
+		const request = vi.fn(async (operation: string) => operation === 'snapshot' ? risky : { ok: true }) as unknown as typeof browserRequest
+		const runner = new BrowserToolRunner({ sendEvent: () => {} }, request, approve)
+		runner.handle(done('browser_snapshot', {}, 'snapshot-risky-link'))
+		await runner.settled()
+		runner.handle(done('browser_click', { reference: 'e3-risk' }, 'risky-link'))
+		await runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(request).toHaveBeenCalledTimes(1)
+	})
+
+	it('does not match a destination hostname inside a longer hostname', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('notexample.comを開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/' }, 'host-boundary'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
 	})
 
 	it('requires execution-time approval for a DOM-event click', async () => {
