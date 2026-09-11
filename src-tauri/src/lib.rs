@@ -80,6 +80,7 @@ pub fn run() {
             browser::browser_open,
             browser::browser_navigate,
             browser::browser_status,
+            browser::browser_set_always_on_top,
             browser::browser_close,
             browser::browser_snapshot,
             browser::browser_click,

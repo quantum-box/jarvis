@@ -1782,6 +1782,7 @@ dependencies = [
  "cbc",
  "cookie",
  "pbkdf2",
+ "psl",
  "rusqlite",
  "security-framework",
  "serde",
@@ -2760,6 +2761,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "psl"
+version = "2.1.232"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62834e308cc83aea5e30cd8c80b8aa82cdb104a3240c7f210d4f68d46e29f308"
+dependencies = [
+ "psl-types",
 ]
 
 [[package]]

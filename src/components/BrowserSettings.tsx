@@ -4,6 +4,7 @@ import { Cookie, Globe2, Trash2 } from 'lucide-react'
 import {
 	isManagedBrowserAvailable,
 	loadBrowserAlwaysOnTop,
+	browserRequest,
 	saveBrowserAlwaysOnTop,
 } from '../lib/browser'
 
@@ -98,8 +99,11 @@ export function BrowserSettings() {
 					type="checkbox"
 					checked={alwaysOnTop}
 					onChange={event => {
-						setAlwaysOnTop(event.target.checked)
-						saveBrowserAlwaysOnTop(event.target.checked)
+						const value = event.target.checked
+						setAlwaysOnTop(value)
+						saveBrowserAlwaysOnTop(value)
+						void browserRequest('set_always_on_top', { alwaysOnTop: value })
+							.catch(error => setMessage(String(error)))
 					}}
 				/>
 				ブラウザを最前面に表示

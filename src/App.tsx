@@ -305,10 +305,15 @@ export default function App() {
   }
   function send() {
     if (!draft.trim() || !connected) return;
+    const text = draft.trim();
     try {
-      client.current?.sendText(draft.trim());
+      resolveBrowserApproval(false);
+      browserTools.current?.interrupt();
+      browserTools.current?.setUserUtterance(text);
+      client.current?.sendText(text);
       setDraft("");
     } catch (e) {
+      browserTools.current?.setUserUtterance('');
       setError(e instanceof Error ? e.message : "送信できませんでした。");
     }
   }

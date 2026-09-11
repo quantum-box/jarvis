@@ -186,16 +186,21 @@ mod platform {
         url: Option<String>,
         always_on_top: bool,
     ) -> Result<BrowserStatus, String> {
-        let target = validate_url(url.as_deref().unwrap_or(DEFAULT_URL))?;
-        let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
         let browser = if let Some(browser) = app.get_webview_window(LABEL) {
-            let fragment_only = browser
-                .url()
-                .ok()
-                .is_some_and(|current| fragment_only_navigation(&current, &target));
-            browser
-                .navigate(target)
-                .map_err(|_| "ページを開けませんでした。".to_string())?;
+            if let Some(url) = url {
+                let target = validate_url(&url)?;
+                let fragment_only = browser
+                    .url()
+                    .ok()
+                    .is_some_and(|current| fragment_only_navigation(&current, &target));
+                let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
+                browser
+                    .navigate(target)
+                    .map_err(|_| "ページを開けませんでした。".to_string())?;
+                if !fragment_only {
+                    wait_for_page_load(&browser, load_start).await?;
+                }
+            }
             browser
                 .set_always_on_top(always_on_top)
                 .map_err(|_| "最前面設定を変更できませんでした。".to_string())?;
@@ -203,11 +208,10 @@ mod platform {
                 .show()
                 .map_err(|_| "ブラウザを表示できませんでした。".to_string())?;
             let _ = browser.set_focus();
-            if !fragment_only {
-                wait_for_page_load(&browser, load_start).await?;
-            }
             browser
         } else {
+            let target = validate_url(url.as_deref().unwrap_or(DEFAULT_URL))?;
+            let load_start = FINISHED_PAGE_LOADS.load(Ordering::Acquire);
             let browser = create_window(app, target, always_on_top, true)?;
             wait_for_page_load(&browser, load_start).await?;
             browser
@@ -248,6 +252,19 @@ mod platform {
 
     pub fn status(app: &AppHandle) -> Result<BrowserStatus, String> {
         status_for(app.get_webview_window(LABEL))
+    }
+
+    pub fn set_always_on_top(
+        app: &AppHandle,
+        always_on_top: bool,
+    ) -> Result<BrowserStatus, String> {
+        let browser = app.get_webview_window(LABEL);
+        if let Some(browser) = browser.as_ref() {
+            browser
+                .set_always_on_top(always_on_top)
+                .map_err(|_| "最前面設定を変更できませんでした。".to_string())?;
+        }
+        status_for(browser)
     }
 
     fn status_for(browser: Option<WebviewWindow>) -> Result<BrowserStatus, String> {
@@ -544,6 +561,20 @@ pub async fn browser_status(app: AppHandle) -> Result<BrowserStatus, String> {
             url: None,
             always_on_top: false,
         })
+    }
+}
+
+#[tauri::command]
+pub async fn browser_set_always_on_top(
+    app: AppHandle,
+    always_on_top: bool,
+) -> Result<BrowserStatus, String> {
+    #[cfg(target_os = "macos")]
+    return platform::set_always_on_top(&app, always_on_top);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, always_on_top);
+        Err("フローティングブラウザはmacOS版で利用できます。".into())
     }
 }
 

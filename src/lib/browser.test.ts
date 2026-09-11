@@ -110,6 +110,18 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot', 'click', 'snapshot'])
 	})
 
+	it('does not infer approval for a consequential control from a negated mention', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-negation'))
+		await f.runner.settled()
+		f.runner.setUserUtterance('削除はしないで、キャンセルをクリックして')
+		f.runner.handle(done('browser_click', { reference: 'e3-2' }, 'wrong-delete'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
 	it('allows exactly stated form text and verifies with a fresh snapshot', async () => {
 		const f = fixture()
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot'))

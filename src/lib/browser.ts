@@ -458,7 +458,7 @@ export class BrowserToolRunner {
 				const label = element?.label || 'ページ上の操作'
 				const labelExplicit = utteranceContains(this.utterance, label)
 				const consequential = consequentialWords.test(label)
-				explicit = labelExplicit && actionWords.test(this.utterance) && (!consequential || consequentialWords.test(this.utterance))
+				explicit = !consequential && labelExplicit && actionWords.test(this.utterance)
 				description = `${label}を実行します。ページのeventを発火する操作です。`
 				detail = this.snapshot?.url
 			}

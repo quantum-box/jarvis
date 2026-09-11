@@ -120,9 +120,14 @@ mod platform {
         if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
             return Err("ホスト名だけを指定してください。".into());
         }
-        url.host_str()
+        let host = url
+            .host_str()
             .map(|host| host.to_ascii_lowercase())
-            .ok_or_else(|| "対象ドメインが正しくありません。".into())
+            .ok_or_else(|| "対象ドメインが正しくありません。".to_string())?;
+        if psl::domain_str(&host).is_none() {
+            return Err("サイトを特定できるドメインを指定してください。".into());
+        }
+        Ok(host)
     }
 
     fn validate_profile(app: &AppHandle, profile: &str) -> Result<PathBuf, String> {
@@ -306,6 +311,8 @@ mod platform {
     }
 
     fn set_cookie(browser: &WebviewWindow, row: &CookieRow, value: &str) -> Result<(), String> {
+        // NSHTTPCookie keeps an exact-host scope when Domain has no leading dot,
+        // and a subdomain scope when it does. Chrome host_key uses the same distinction.
         let mut cookie = tauri::webview::Cookie::build((row.name.as_str(), value))
             .domain(row.host.as_str())
             .path(if row.path.is_empty() {
@@ -492,6 +499,12 @@ mod tests {
             "example.com"
         );
         assert!(normalize_domain("https://user@example.com").is_err());
+        assert!(normalize_domain("com").is_err());
+        assert!(normalize_domain("co.uk").is_err());
+        assert_eq!(
+            normalize_domain("login.example.co.uk").unwrap(),
+            "login.example.co.uk"
+        );
     }
 
     #[test]
