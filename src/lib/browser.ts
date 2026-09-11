@@ -221,6 +221,7 @@ export class BrowserToolRunner {
 
 	handle(event: RealtimeEvent) {
 		if (event.type === 'input_audio_buffer.speech_started') {
+			this.utterance = ''
 			this.interrupt()
 			return
 		}

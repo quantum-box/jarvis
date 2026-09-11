@@ -120,6 +120,39 @@ describe('BrowserToolRunner', () => {
 		expect(approve).toHaveBeenCalledOnce()
 		expect(request).toHaveBeenCalledTimes(1)
 	})
+
+	it('cancels a pending authorization when the user starts speaking', async () => {
+		let resolveApproval: ((approved: boolean) => void) | undefined
+		const approve = vi.fn(
+			() =>
+				new Promise<boolean>(resolve => {
+					resolveApproval = resolve
+				}),
+		)
+		const f = fixture(approve)
+		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-speech'))
+		await f.runner.settled()
+		f.runner.setUserUtterance('別の操作')
+		f.runner.handle(done('browser_click', { reference: 'e3-2' }, 'stale-click'))
+		await vi.waitFor(() => expect(approve).toHaveBeenCalledOnce())
+		f.runner.handle({ type: 'input_audio_buffer.speech_started' })
+		resolveApproval?.(true)
+		await f.runner.settled()
+		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+	})
+
+	it('clears the previous utterance when the user starts speaking', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('example.comを開いて')
+		f.runner.handle({ type: 'input_audio_buffer.speech_started' })
+		f.runner.handle(
+			done('browser_navigate', { url: 'https://example.com/' }, 'new-speech-nav'),
+		)
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
 })
 
 describe('isMacDesktopEnvironment', () => {

@@ -219,6 +219,9 @@ export default function App() {
         if (event.type === 'data_channel.open' && browserAvailable) {
           next.sendEvent(browserSessionConfig(settings.instructions));
         }
+        if (event.type === 'input_audio_buffer.speech_started') {
+          resolveBrowserApproval(false);
+        }
         browserTools.current?.handle(event);
       },
       onTranscript: (item) => {
