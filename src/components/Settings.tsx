@@ -120,7 +120,7 @@ export function Settings({
         {field("baseUrl", "Tachyon API URL", "https://api.n1.tachy.one")}
         {tenants.length ? <label>利用するテナント<select value={value.tenantId} onChange={e => onChange({...value, tenantId: e.target.value, chatroomId: ''})}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label> : field("tenantId", "Tenant ID", "ログイン後に取得します")}
         {!signedIn && <details><summary>ログイン接続設定</summary><div className="settings-fields">{field('cognitoRegion', 'Cognito region')}{field('cognitoClientId', 'Cognito public client ID', 'Tachyonと共通の公開クライアントID')}</div></details>}
-        {field("chatroomId", "Chatroom ID", "空欄なら初回の会話開始時に自動作成")}
+        {field("chatroomId", "Chatroom ID", "空欄ならこの起動中の初回に自動作成")}
         <div className="field-row">
           {field("model", "Model")}
           {!liveModelSelected && <label>
