@@ -44,7 +44,7 @@ const audioInput = spawnSync(
 if (audioInput.status !== 0 || audioInput.stdout.trim() !== 'true') {
   throw new Error('Signed app must allow com.apple.security.device.audio-input');
 }
-const signature = run('codesign', ['-d', '--verbose=4', appPath]);
+const signature = run('codesign', ['-d', '--verbose=5', appPath]);
 const fields = new Map(
   signature.split(/\r?\n/).flatMap(line => {
     const match = line.match(/^([^=]+)=(.*)$/);
@@ -56,6 +56,9 @@ if (fields.get('Identifier') !== expectedIdentifier) {
 }
 if (fields.get('TeamIdentifier') !== expectedTeamId) {
   throw new Error(`Code signature team does not match ${expectedTeamId}`);
+}
+if (process.platform === 'darwin' && fields.get('Page size') !== '4096') {
+  throw new Error(`macOS code signature page size must be 4096 bytes, got ${fields.get('Page size') || '(missing)'}`);
 }
 const authorities = signature.split(/\r?\n/)
   .filter(line => line.startsWith('Authority='))

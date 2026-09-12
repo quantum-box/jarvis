@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -46,11 +46,27 @@ const archiveUrl = githubReleases
   : new URL(`${platform}/${pkg.version}/JARVIS.app.tar.gz`, base).href;
 const temp = mkdtempSync(join(tmpdir(), 'jarvis-release-'));
 try {
+  // macOS 26 Tahoe's AMFI has compatibility problems loading 16 KiB
+  // code-signature pages for larger native binaries. Keep the signing
+  // invocation explicit so the signed app works on both current and older
+  // macOS runners. The wrapper only changes signing calls; verification and
+  // notarization commands continue to use the system codesign unchanged.
+  const codesignPageSize = process.platform === 'darwin'
+    ? (process.env.JARVIS_CODESIGN_PAGE_SIZE || '4096')
+    : '';
+  const buildEnv = { ...process.env };
+  if (codesignPageSize && codesignPageSize !== 'off') {
+    if (!/^\d+$/.test(codesignPageSize)) throw new Error('JARVIS_CODESIGN_PAGE_SIZE must be numeric or off');
+    const codesignWrapper = join(temp, 'codesign');
+    writeFileSync(codesignWrapper, '#!/bin/sh\nset -eu\nfor arg in "$@"; do\n  case "$arg" in\n    --sign|-s|--sign=*|-s?*)\n      exec /usr/bin/codesign --pagesize=' + codesignPageSize + ' "$@"\n      ;;\n  esac\ndone\nexec /usr/bin/codesign "$@"\n');
+    chmodSync(codesignWrapper, 0o755);
+    buildEnv.PATH = `${temp}:${process.env.PATH || ''}`;
+  }
   const configPath = join(temp, 'updater.json');
   writeFileSync(configPath, JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey, endpoints: [endpoint] } } }));
   const build = spawnSync('npm', ['run', 'tauri', 'build', '--', '--ci', '--target', target, '--bundles', 'app', '--config', configPath, '--', '--locked'], {
     stdio: 'inherit',
-    env: { ...process.env, APPLE_SIGNING_IDENTITY: appleIdentity },
+    env: { ...buildEnv, APPLE_SIGNING_IDENTITY: appleIdentity },
   });
   if (build.status !== 0) throw new Error(`Tauri build failed (${build.status})`);
   const bundle = resolve(`src-tauri/target/${target}/release/bundle/macos/JARVIS.app.tar.gz`);

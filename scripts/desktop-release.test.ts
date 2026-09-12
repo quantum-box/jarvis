@@ -42,6 +42,7 @@ else process.exit(1);
 if (process.argv.includes('--entitlements')) process.stdout.write('<plist><dict><key>com.apple.security.device.audio-input</key><true/></dict></plist>');
 else if (process.argv.includes('-d')) process.stderr.write([
   'Identifier=com.quantumbox.jarvis',
+  'Page size=4096',
   'Authority=Developer ID Application: Quantum Box, Inc. (J8429VCGMR)',
   'TeamIdentifier=J8429VCGMR',
 ].join('\\n') + '\\n');
@@ -62,6 +63,7 @@ process.stderr.write('source=Notarized Developer ID\\n');
     APPLE_API_KEY: 'TEST',
     APPLE_API_ISSUER: '00000000-0000-0000-0000-000000000000',
     APPLE_API_KEY_PATH: join(root, 'AuthKey_TEST.p8'),
+    JARVIS_CODESIGN_PAGE_SIZE: 'off',
   };
   return { root, env, run: (override = {}) => spawnSync(process.execPath, [resolve('scripts/desktop-release.mjs'), 'aarch64-apple-darwin'], { cwd: root, env: { ...env, ...override }, encoding: 'utf8' }) };
 }
