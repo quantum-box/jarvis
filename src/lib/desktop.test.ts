@@ -198,7 +198,7 @@ describe('external app shortcuts', () => {
 })
 
 describe('desktop tools in voice sessions', () => {
-	it('invalidates a shortcut already queued in the native layer when speech interrupts', async () => {
+	it('reports a cancelled shortcut already queued in the native layer when speech interrupts', async () => {
 		const f = fixture()
 		let queued: (() => void) | undefined
 		let posted = false
@@ -225,7 +225,8 @@ describe('desktop tools in voice sessions', () => {
 		await runner.settled()
 		expect(posted).toBe(false)
 		expect(f.state.generation).toBe(1)
-		expect(events.filter(event => event.type === 'conversation.item.create')).toHaveLength(1)
+		const outputs = events.filter(event => event.type === 'conversation.item.create')
+		expect(outputs).toHaveLength(1)
 	})
 
 	it.each([false, true])('shares the serialized voice runner and respects interruption (Live=%s)', async live => {
@@ -259,10 +260,11 @@ describe('desktop tools in voice sessions', () => {
 		runner.handle({ type: 'input_audio_buffer.speech_started' })
 		await runner.settled()
 		expect(f.request.mock.calls.filter(([op]) => op === 'send_shortcut')).toHaveLength(1)
+		expect(events.filter(event => event.type === 'response.create')).toHaveLength(live ? 3 : 2)
 		runner.setSuspended(true)
 		dispatch('desktop_list_apps')
 		await runner.settled()
-		expect(events.filter(event => event.type === 'response.create')).toHaveLength(2)
+		expect(events.filter(event => event.type === 'response.create')).toHaveLength(live ? 3 : 2)
 	})
 
 	it('registers app tools and their scope in both model configurations', () => {

@@ -237,7 +237,7 @@ describe('Realtime', () => {
 		expect(client.getState()).toBe('disconnected')
 	})
 
-	it('places local tools in the initial GPT Live Responses delegation', async () => {
+	it('places Live delegation instructions and local tools in the initial GPT Live session', async () => {
 		const transport = makeTransport()
 		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
 			new Response(JSON.stringify({
@@ -254,6 +254,7 @@ describe('Realtime', () => {
 				getUserMedia: vi.fn(async () => transport.stream),
 			},
 			{
+				liveInstructions: 'Delegate browser work before answering.',
 				backend: {
 					instructions: 'Use local browser tools.',
 					tools: [{ type: 'function', name: 'browser_snapshot' }],
@@ -265,6 +266,7 @@ describe('Realtime', () => {
 
 		await client.start()
 		const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)
+		expect(body.session.instructions).toBe('Delegate browser work before answering.')
 		expect(body.session.delegation.responses).toMatchObject({
 			instructions: 'Use local browser tools.',
 			tools: [{ type: 'function', name: 'browser_snapshot' }],
@@ -381,6 +383,7 @@ describe('Realtime', () => {
 		expect(transcripts).toMatchObject([
 			{ id: 'live:user:0', role: 'user', text: 'Hello', final: false },
 			{ id: 'live:user:0', role: 'user', text: 'Hello there', final: false },
+			{ id: 'live:user:0', role: 'user', text: 'Hello there', final: true },
 			{ id: 'live:assistant:0', role: 'assistant', text: 'Hi', final: false },
 			{ id: 'live:assistant:1', role: 'assistant', text: ' again', final: false },
 		])

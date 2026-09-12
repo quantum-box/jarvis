@@ -42,8 +42,14 @@ import {
   browserSessionConfig,
   isManagedBrowserAvailable,
   loadBrowserOpacity,
-  type BrowserApprovalRequest,
 } from "./lib/browser";
+import {
+  isAssistantPlaybackEndEvent,
+  isAssistantResponseStartEvent,
+  isConversationEndRequest,
+} from "./lib/conversation";
+
+const CONVERSATION_END_FALLBACK_MS = 15_000;
 
 export default function App() {
   const [updater] = useState(() => new UpdateController());
@@ -79,8 +85,9 @@ export default function App() {
   const [now, setNow] = useState(new Date());
   const client = useRef<RealtimeClient | null>(null);
   const browserTools = useRef<BrowserToolRunner | null>(null);
-  const browserApprovalResolver = useRef<((approved: boolean) => void) | null>(null);
-  const [browserApproval, setBrowserApproval] = useState<BrowserApprovalRequest | null>(null);
+  const conversationEndPending = useRef(false);
+  const conversationFarewellStarted = useRef(false);
+  const conversationEndFallback = useRef<ReturnType<typeof setTimeout> | null>(null);
   const browserAvailable = isManagedBrowserAvailable();
   const messageEnd = useRef<HTMLDivElement>(null);
   const connected = state === "connected";
@@ -94,7 +101,7 @@ export default function App() {
     dismissedUpdateVersion !== startupUpdateVersion,
   );
   const browserExecutionObscured = showSettings || Boolean(loginSession) || startupPromptVisible;
-  const browserObscured = browserExecutionObscured || Boolean(browserApproval);
+  const browserObscured = browserExecutionObscured;
   useEffect(() => {
     browserTools.current?.setSuspended(browserExecutionObscured);
   }, [browserExecutionObscured]);
@@ -121,8 +128,8 @@ export default function App() {
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     const endSession = () => {
+      clearConversationEndRequest();
       browserTools.current?.stop();
-      browserApprovalResolver.current?.(false);
       void client.current?.disconnect();
     };
     window.addEventListener('pagehide', endSession);
@@ -195,6 +202,7 @@ export default function App() {
   }
   async function logout() {
     connectionAttempt.current++;
+    clearConversationEndRequest();
     stopBrowserTools();
     const auth = authRef.current;
     authRef.current = null; authSubscription.current?.();
@@ -207,6 +215,7 @@ export default function App() {
     finally { await auth?.logout(); }
   }
   async function connect() {
+    clearConversationEndRequest();
     stopBrowserTools();
     if (restoring) return;
     if (updater.blocksConversation) { setShowSettings(true); return; }
@@ -229,7 +238,10 @@ export default function App() {
     const next: RealtimeClient = new RealtimeClient({
       onStateChange: (value) => {
         if (client.current !== next) return;
-        if (value === 'error' || value === 'disconnected') stopBrowserTools();
+        if (value === 'error' || value === 'disconnected') {
+          clearConversationEndRequest();
+          stopBrowserTools();
+        }
         setState(value);
       },
       onLevel: (value) => { if (client.current === next) setLevel(value); },
@@ -237,6 +249,7 @@ export default function App() {
       onActivityChange: (value) => { if (client.current === next) setActivity(value); },
       onError: (value) => {
         if (client.current !== next) return;
+        clearConversationEndRequest();
         stopBrowserTools();
         setError(value);
       },
@@ -245,14 +258,24 @@ export default function App() {
         if (event.type === 'data_channel.open' && browserAvailable && normalizeRealtimeModel(settings.model) !== DEFAULT_REALTIME_MODEL) {
           next.sendEvent(browserSessionConfig(settings.instructions));
         }
-        if (event.type === 'input_audio_buffer.speech_started' || event.type === 'session.input_transcript.delta') {
-          resolveBrowserApproval(false);
-        }
         browserTools.current?.handle(event);
+        if (conversationEndPending.current && isAssistantResponseStartEvent(event.type)) {
+          conversationFarewellStarted.current = true;
+        }
+        if (
+          conversationEndPending.current &&
+          conversationFarewellStarted.current &&
+          isAssistantPlaybackEndEvent(event.type)
+        ) {
+          finishConversationEnd();
+        }
       },
       onTranscript: (item) => {
         if (client.current !== next) return;
-        if (item.role === 'user') browserTools.current?.setUserUtterance(item.text);
+        if (item.role === 'user') {
+          browserTools.current?.setUserUtterance(item.text);
+          if (item.final && isConversationEndRequest(item.text)) requestConversationEnd();
+        }
         setMessages((previous) => {
           const index = previous.findIndex((m) => m.id === item.id);
           return index < 0
@@ -263,7 +286,7 @@ export default function App() {
     });
     client.current = next;
     browserTools.current = browserAvailable
-      ? new BrowserToolRunner(next, browserRequest, requestBrowserApproval, setError)
+      ? new BrowserToolRunner(next, browserRequest, async () => false, setError)
       : null;
     browserTools.current?.setSuspended(browserExecutionObscured);
     try {
@@ -297,6 +320,7 @@ export default function App() {
       );
     } catch (e) {
       if (client.current !== next || connectionAttempt.current !== attempt) return;
+      clearConversationEndRequest();
       stopBrowserTools();
       setState('error');
       setError(
@@ -308,30 +332,33 @@ export default function App() {
   }
   function stop() {
     connectionAttempt.current++;
+    clearConversationEndRequest();
     stopBrowserTools();
     client.current?.disconnect();
     setState('idle');
     setMuted(false);
   }
+  function clearConversationEndRequest() {
+    conversationEndPending.current = false;
+    conversationFarewellStarted.current = false;
+    if (conversationEndFallback.current !== null) clearTimeout(conversationEndFallback.current);
+    conversationEndFallback.current = null;
+  }
+  function requestConversationEnd() {
+    if (conversationEndPending.current) return;
+    conversationEndPending.current = true;
+    conversationFarewellStarted.current = false;
+    conversationEndFallback.current = setTimeout(finishConversationEnd, CONVERSATION_END_FALLBACK_MS);
+  }
+  function finishConversationEnd() {
+    if (!conversationEndPending.current) return;
+    clearConversationEndRequest();
+    stop();
+    setShowConversation(false);
+  }
   function stopBrowserTools() {
     browserTools.current?.stop();
     browserTools.current = null;
-    browserApprovalResolver.current?.(false);
-    browserApprovalResolver.current = null;
-    setBrowserApproval(null);
-  }
-  function requestBrowserApproval(request: BrowserApprovalRequest) {
-    return new Promise<boolean>((resolve) => {
-      browserApprovalResolver.current?.(false);
-      browserApprovalResolver.current = resolve;
-      setBrowserApproval(request);
-    });
-  }
-  function resolveBrowserApproval(approved: boolean) {
-    const resolve = browserApprovalResolver.current;
-    browserApprovalResolver.current = null;
-    setBrowserApproval(null);
-    resolve?.(approved);
   }
   async function openBrowser() {
     try {
@@ -349,10 +376,10 @@ export default function App() {
     if (!draft.trim() || !connected) return;
     const text = draft.trim();
     try {
-      resolveBrowserApproval(false);
       browserTools.current?.interrupt();
       browserTools.current?.setUserUtterance(text);
       client.current?.sendText(text);
+      if (isConversationEndRequest(text)) requestConversationEnd();
       setDraft("");
     } catch (e) {
       browserTools.current?.setUserUtterance('');
@@ -593,21 +620,6 @@ export default function App() {
             }}
           />
         )}
-      {browserApproval && (
-        <div className="browser-approval-backdrop" role="presentation">
-          <section className="browser-approval" role="dialog" aria-modal="true" aria-labelledby="browser-approval-title">
-            <span className="eyebrow">Browser action</span>
-            <h2 id="browser-approval-title">この操作を1回だけ許可しますか？</h2>
-            <p>{browserApproval.description}</p>
-            {browserApproval.detail && <code>{browserApproval.detail}</code>}
-            <p className="muted">依頼した操作と対象を確認してください。</p>
-            <div className="browser-approval-actions">
-              <button className="text-button" onClick={() => resolveBrowserApproval(false)}>許可しない</button>
-              <button className="primary" onClick={() => resolveBrowserApproval(true)}>1回だけ許可</button>
-            </div>
-          </section>
-        </div>
-      )}
       {loginSession && <Login auth={loginSession} onAuthenticated={() => finishLogin(loginSession)} onClose={cancelLogin}/>}
     </div>
   );

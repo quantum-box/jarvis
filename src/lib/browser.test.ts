@@ -44,7 +44,6 @@ const liveDone = (name: string, args: Record<string, unknown>, id: string): Real
 		delegation_id: 'delegation-live',
 		event: {
 			type: 'response.output_item.done',
-			response_id: 'response-live',
 			item: { type: 'function_call', name, call_id: id, arguments: JSON.stringify(args) },
 		},
 	},
@@ -71,7 +70,7 @@ function fixture(approve = vi.fn(async () => false)) {
 }
 
 describe('BrowserToolRunner', () => {
-	it('runs GPT Live nested Responses calls and returns a Responses tool result', async () => {
+	it('correlates GPT Live calls by delegation id when output items omit response_id', async () => {
 		const f = fixture()
 		for (const event of liveDone('browser_snapshot', {}, 'live-snapshot')) {
 			f.runner.handle(event)
@@ -91,6 +90,39 @@ describe('BrowserToolRunner', () => {
 		f.runner.handle(item)
 		await f.runner.settled()
 		expect(f.operations).toEqual([])
+		f.runner.handle(completed)
+		await f.runner.settled()
+		expect(f.operations.map(entry => entry.operation)).toEqual(['snapshot'])
+	})
+
+	it('completes a Live call that becomes stale before its terminal event', async () => {
+		const f = fixture()
+		const [created, item, completed] = liveDone('browser_snapshot', {}, 'stale-live-call')
+		f.runner.handle(created)
+		f.runner.handle(item)
+		f.runner.handle({ type: 'input_audio_buffer.speech_started' })
+		f.runner.handle(completed)
+		await f.runner.settled()
+		expect(f.operations).toEqual([])
+		expect(f.events).toMatchObject([
+			{
+				type: 'response.item.create',
+				item: {
+					type: 'function_call_output',
+					call_id: 'stale-live-call',
+					output: expect.stringContaining('error'),
+				},
+			},
+			{ type: 'response.create' },
+		])
+	})
+
+	it('does not invalidate a Live call on a trailing transcript delta', async () => {
+		const f = fixture()
+		const [created, item, completed] = liveDone('browser_snapshot', {}, 'live-after-transcript')
+		f.runner.handle(created)
+		f.runner.handle({ type: 'session.input_transcript.delta', delta: '検索して' })
+		f.runner.handle(item)
 		f.runner.handle(completed)
 		await f.runner.settled()
 		expect(f.operations.map(entry => entry.operation)).toEqual(['snapshot'])
@@ -481,7 +513,7 @@ describe('BrowserToolRunner', () => {
 		expect(request).toHaveBeenCalledTimes(2)
 	})
 
-	it('cancels a pending authorization when the user starts speaking', async () => {
+	it('returns a tool result when the user interrupts a pending Live authorization', async () => {
 		let resolveApproval: ((approved: boolean) => void) | undefined
 		const approve = vi.fn(
 			() =>
@@ -492,13 +524,27 @@ describe('BrowserToolRunner', () => {
 		const f = fixture(approve)
 		f.runner.handle(done('browser_snapshot', {}, 'snapshot-before-speech'))
 		await f.runner.settled()
+		f.events.length = 0
 		f.runner.setUserUtterance('別の操作')
-		f.runner.handle(done('browser_click', { reference: 'e3-2' }, 'stale-click'))
+		for (const event of liveDone('browser_click', { reference: 'e3-2' }, 'stale-click')) {
+			f.runner.handle(event)
+		}
 		await vi.waitFor(() => expect(approve).toHaveBeenCalledOnce())
 		f.runner.handle({ type: 'input_audio_buffer.speech_started' })
 		resolveApproval?.(true)
 		await f.runner.settled()
 		expect(f.operations.map(item => item.operation)).toEqual(['snapshot'])
+		expect(f.events).toMatchObject([
+			{
+				type: 'response.item.create',
+				item: {
+					type: 'function_call_output',
+					call_id: 'stale-click',
+					output: expect.stringContaining('error'),
+				},
+			},
+			{ type: 'response.create' },
+		])
 	})
 
 	it('discards a terminal response that started before an interruption', async () => {
@@ -554,6 +600,8 @@ describe('BrowserToolRunner', () => {
 describe('browserBackendConfig', () => {
 	it('adds browser tools to the managed Responses delegation configuration', () => {
 		const config = browserBackendConfig('You are JARVIS.')
+		expect(config.liveInstructions).toEqual(expect.stringContaining('Delegation policy:'))
+		expect(config.liveInstructions).toEqual(expect.stringContaining('ブラウザウィンドウ'))
 		expect(config.backend).toMatchObject({
 			instructions: expect.stringContaining('You are JARVIS.'),
 			toolChoice: 'auto',
