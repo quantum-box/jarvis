@@ -36,12 +36,12 @@ export function DesktopSettings() {
 		<div className="browser-settings-heading">
 			<Keyboard size={18} />
 			<div>
-				<h3 id="desktop-settings-title">外部アプリのショートカット</h3>
-				<p>「CodexでCmd+1」のように、アプリ名とキーを音声で指定できます。</p>
+				<h3 id="desktop-settings-title">外部アプリとウィンドウ</h3>
+				<p>アプリの切り替え、個別ウィンドウの移動・サイズ変更・最小化、ショートカットを音声で指定できます。</p>
 			</div>
 		</div>
 		<p role="status">アクセシビリティ：{granted === null ? '確認中' : granted ? '許可済み' : '未許可'}</p>
-		<p className="muted">macOSの「プライバシーとセキュリティ」→「アクセシビリティ」でJARVISを許可してください。ショートカットの動作は各アプリの設定に従います。</p>
+		<p className="muted">macOSの「プライバシーとセキュリティ」→「アクセシビリティ」でJARVISを許可してください。ウィンドウの対応範囲と最小サイズ、ショートカットの動作は各アプリに従います。</p>
 		<button type="button" className="text-button" disabled={busy} onClick={() => void openSettings()}>アクセシビリティ設定を開く</button>
 		{message && <p role="alert" className="error-banner">{message}</p>}
 	</section>
