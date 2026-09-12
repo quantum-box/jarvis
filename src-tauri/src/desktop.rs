@@ -15,6 +15,43 @@ pub struct DesktopState {
     apps: Vec<DesktopApp>,
     frontmost_pid: Option<i32>,
     accessibility_granted: bool,
+    generation: u64,
+}
+
+#[cfg(any(target_os = "macos", test))]
+struct ExecutionState(std::sync::Mutex<u64>);
+
+#[cfg(any(target_os = "macos", test))]
+impl ExecutionState {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(0))
+    }
+
+    fn current(&self) -> Result<u64, String> {
+        self.0
+            .lock()
+            .map(|value| *value)
+            .map_err(|_| "アプリ操作の状態を確認できません。".into())
+    }
+
+    fn cancel(&self) -> Result<(), String> {
+        let mut current = self.0.lock().map_err(|_| "アプリ操作を中断できません。")?;
+        *current += 1;
+        Ok(())
+    }
+
+    fn run<T>(&self, generation: u64, action: impl FnOnce() -> T) -> Result<T, String> {
+        let current = self
+            .0
+            .lock()
+            .map_err(|_| "アプリ操作の状態を確認できません。")?;
+        if generation != *current {
+            return Err("会話が中断されたため、キーは送信していません。".into());
+        }
+        // Keep down/up together once sending starts. Cancellation invalidates all
+        // older queued sends, but must not strand a key between these two events.
+        Ok(action())
+    }
 }
 
 #[derive(Deserialize)]
@@ -125,6 +162,12 @@ mod platform {
     use objc2_foundation::{NSString, NSURL};
     use tokio::sync::oneshot;
 
+    static EXECUTION: ExecutionState = ExecutionState::new();
+
+    pub fn cancel_pending() -> Result<(), String> {
+        EXECUTION.cancel()
+    }
+
     pub async fn on_main<T: Send + 'static>(
         app: AppHandle,
         action: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -163,7 +206,7 @@ mod platform {
         Ok(app)
     }
 
-    pub fn list_apps() -> DesktopState {
+    pub fn list_apps() -> Result<DesktopState, String> {
         let workspace = NSWorkspace::sharedWorkspace();
         let mut apps: Vec<_> = workspace
             .runningApplications()
@@ -172,13 +215,14 @@ mod platform {
             .filter(|app| app.pid as u32 != std::process::id())
             .collect();
         apps.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
-        DesktopState {
+        Ok(DesktopState {
             apps,
             frontmost_pid: workspace
                 .frontmostApplication()
                 .map(|app| app.processIdentifier()),
             accessibility_granted: CGPreflightPostEventAccess(),
-        }
+            generation: EXECUTION.current()?,
+        })
     }
 
     pub fn activate(identity: DesktopApp) -> Result<(), String> {
@@ -196,6 +240,7 @@ mod platform {
     pub fn send_shortcut(
         identity: DesktopApp,
         shortcut: Shortcut,
+        generation: u64,
     ) -> Result<serde_json::Value, String> {
         let (key, flags) = shortcut_event(&shortcut)?;
         let _app = target(&identity)?;
@@ -223,8 +268,10 @@ mod platform {
         }
         // Address the process even after checking focus; a concurrent user switch must
         // never send this chord to the newly focused application.
-        CGEvent::post_to_pid(identity.pid, Some(&down));
-        CGEvent::post_to_pid(identity.pid, Some(&up));
+        EXECUTION.run(generation, || {
+            CGEvent::post_to_pid(identity.pid, Some(&down));
+            CGEvent::post_to_pid(identity.pid, Some(&up));
+        })?;
         Ok(
             serde_json::json!({ "sent": true, "app": identity, "key": shortcut.key, "modifiers": shortcut.modifiers, "effectVerified": false }),
         )
@@ -251,7 +298,7 @@ mod platform {
 pub async fn desktop_list_apps(app: AppHandle) -> Result<DesktopState, String> {
     #[cfg(target_os = "macos")]
     {
-        platform::on_main(app, || Ok(platform::list_apps())).await
+        platform::on_main(app, platform::list_apps).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -278,14 +325,32 @@ pub async fn desktop_send_shortcut(
     app: AppHandle,
     target: DesktopApp,
     shortcut: Shortcut,
+    generation: u64,
 ) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "macos")]
     {
-        platform::on_main(app, move || platform::send_shortcut(target, shortcut)).await
+        platform::on_main(app, move || {
+            platform::send_shortcut(target, shortcut, generation)
+        })
+        .await
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, target, shortcut);
+        let _ = (app, target, shortcut, generation);
+        Err("外部アプリ操作はmacOS版で利用できます。".into())
+    }
+}
+
+// Deliberately async without run_on_main_thread: invalidate queued main-thread
+// sends as soon as the cancellation IPC is received by the async runtime.
+#[tauri::command]
+pub async fn desktop_cancel_pending() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::cancel_pending()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
         Err("外部アプリ操作はmacOS版で利用できます。".into())
     }
 }
@@ -306,6 +371,18 @@ pub async fn desktop_open_accessibility_settings(app: AppHandle) -> Result<bool,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_prevents_queued_send_and_allows_a_fresh_generation() {
+        let state = ExecutionState::new();
+        let queued_generation = state.current().unwrap();
+        let mut sent = false;
+        state.cancel().unwrap();
+        assert!(state.run(queued_generation, || sent = true).is_err());
+        assert!(!sent);
+        state.run(state.current().unwrap(), || sent = true).unwrap();
+        assert!(sent);
+    }
 
     #[test]
     fn encodes_command_digit_and_control_shift_tab() {

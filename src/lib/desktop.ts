@@ -11,6 +11,7 @@ export interface DesktopState {
 	apps: DesktopApp[]
 	frontmostPid: number | null
 	accessibilityGranted: boolean
+	generation: number
 }
 
 export const desktopRequest = <T = unknown>(operation: string, args: Record<string, unknown> = {}) =>
@@ -66,28 +67,48 @@ export function parseDesktopShortcut(args: Record<string, unknown>): DesktopShor
 	return { key: args.key, modifiers: modifiers.filter(value => requestedModifiers.includes(value)) }
 }
 
-const normalize = (value: string) => value.normalize('NFKC').toLowerCase()
+const normalizeWords = (value: string) => value.normalize('NFKC').toLowerCase()
 	.replace(/コーデックス/g, 'codex')
 	.replace(/command|コマンド|⌘/g, 'cmd')
 	.replace(/control|コントロール|⌃/g, 'ctrl')
 	.replace(/option|オプション|⌥/g, 'alt')
 	.replace(/シフト|⇧/g, 'shift')
 	.replace(/プラス/g, '+')
-	.replace(/\s+/g, '')
+
+const normalize = (value: string) => normalizeWords(value).replace(/\s+/g, '')
 
 export const shortcutLabel = (shortcut: DesktopShortcut) =>
 	[...shortcut.modifiers.map(value => ({ cmd: 'Cmd', ctrl: 'Ctrl', alt: 'Option', shift: 'Shift' })[value]), shortcut.key].join('+')
 
+const mentionsApp = (text: string, app: DesktopApp) =>
+	[app.name, app.name.replace(/^(Google|Microsoft) /, ''), app.bundleId]
+		.some(name => {
+			if (!name.trim()) return false
+			const pattern = normalizeWords(name).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*')
+			return new RegExp(`(?<![a-z0-9])${pattern}(?![a-z0-9])`).test(text)
+		})
+
 // Explicit app + exact chord can run without another dialog. Other wording uses
 // the existing local approval UI rather than guessing the user's intended keys.
-export function explicitlyRequestsDesktopAction(utterance: string, app: DesktopApp, frontmost: boolean, shortcut?: DesktopShortcut) {
+export function explicitlyRequestsDesktopAction(utterance: string, app: DesktopApp, frontmost: boolean, shortcut?: DesktopShortcut, apps: DesktopApp[] = [app]) {
 	const text = normalize(utterance)
-	if (/(しない|しなく|やめ|送らない|押さない|切り替えない|ではなく|じゃなく|ないで|ない|not|don't|dont|never|cancel)/i.test(text)) return false
-	const namesApp = text.includes(normalize(app.name)) || text.includes(normalize(app.name.replace(/^(Google|Microsoft) /, ''))) || text.includes(normalize(app.bundleId)) ||
+	const appText = normalizeWords(utterance)
+	if (/(しない|しなく|やめ|送らない|押さない|切り替えない|ではなく|じゃなく|ないで|ない)/.test(text) ||
+		/\b(not|don['’]?t|never|cancel)\b/i.test(utterance.normalize('NFKC'))) return false
+	const namesApp = mentionsApp(appText, app) ||
 		(frontmost && /今のアプリ|現在のアプリ|手前のアプリ|currentapp|frontmostapp/.test(text))
-	if (!namesApp) return false
+	if (!namesApp || apps.filter(value => mentionsApp(appText, value)).length > 1) return false
 	if (!shortcut) return /切り替|前面|手前|表示して|activate|switch|focus/.test(text)
 	const chords = text.match(/(?:(?:cmd|ctrl|alt|shift)\+?)+(?:[a-z]+|[0-9]|[\[\]`=\-])(?![a-z0-9])/g) ?? []
+	// Multiple chords or named apps need confirmation: matching them independently
+	// could authorize another app's shortcut (for example Codex Cmd+W, Chrome Cmd+1).
+	if (chords.length !== 1) return false
+	const references = [app.name, app.name.replace(/^(Google|Microsoft) /, ''), app.bundleId,
+		...(frontmost ? ['今のアプリ', '現在のアプリ', '手前のアプリ', 'current app', 'frontmost app'] : [])].filter(Boolean).map(normalize)
+	// Bind the chord to this app even when another mentioned app is not running
+	// and therefore absent from the observed app list. Unrecognized phrasing is confirmed.
+	if (!references.some(reference => ['', 'で', 'に', 'へ', ':', 'press', ',press', 'send'].some(connector => text.includes(`${reference}${connector}${chords[0]}`)) ||
+		text.includes(`${chords[0]}を${reference}`) || text.includes(`${chords[0]}in${reference}`))) return false
 	return chords.some(chord => {
 		const prefix = chord.match(/^(?:(?:cmd|ctrl|alt|shift)\+?)+/)?.[0] ?? ''
 		const requested: string[] = prefix.match(/cmd|ctrl|alt|shift/g) ?? []
@@ -99,6 +120,7 @@ export function explicitlyRequestsDesktopAction(utterance: string, app: DesktopA
 
 export class DesktopToolController {
 	private apps: DesktopApp[] = []
+	private cancellation: Promise<void> = Promise.resolve()
 
 	constructor(
 		private request: typeof desktopRequest = desktopRequest,
@@ -106,9 +128,18 @@ export class DesktopToolController {
 		private delay: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 50)),
 	) {}
 
-	reset() { this.apps = [] }
+	reset() {
+		this.apps = []
+		// Dispatch immediately, independently of the serialized voice tool queue.
+		// New work waits for every cancellation acknowledgement before taking a token.
+		const pending = this.request('cancel_pending')
+		this.cancellation = Promise.all([this.cancellation, pending]).then(() => {})
+		void this.cancellation.catch(() => {})
+	}
 
 	async execute(name: string, args: Record<string, unknown>, utterance: string, assertCurrent: () => void): Promise<unknown> {
+		assertCurrent()
+		await this.cancellation
 		assertCurrent()
 		if (name === 'desktop_list_apps') {
 			const state = await this.request<DesktopState>('list_apps')
@@ -123,7 +154,7 @@ export class DesktopToolController {
 		let state = await this.request<DesktopState>('list_apps')
 		assertCurrent()
 		this.checkTarget(state, app, Boolean(shortcut))
-		if (!explicitlyRequestsDesktopAction(utterance, app, state.frontmostPid === app.pid, shortcut)) {
+		if (!explicitlyRequestsDesktopAction(utterance, app, state.frontmostPid === app.pid, shortcut, state.apps)) {
 			const approved = await this.approve({
 				id: `desktop-${Date.now()}`,
 				operation: name,
@@ -143,7 +174,7 @@ export class DesktopToolController {
 			this.checkTarget(state, app, Boolean(shortcut))
 			if (state.frontmostPid === app.pid) {
 				if (!shortcut) return { activated: true, app }
-				return this.request('send_shortcut', { target: app, shortcut })
+				return this.request('send_shortcut', { target: app, shortcut, generation: state.generation })
 			}
 			await this.delay()
 			assertCurrent()

@@ -81,6 +81,7 @@ pub fn run() {
             desktop::desktop_list_apps,
             desktop::desktop_activate_app,
             desktop::desktop_send_shortcut,
+            desktop::desktop_cancel_pending,
             desktop::desktop_open_accessibility_settings,
             browser::browser_open,
             browser::browser_create,

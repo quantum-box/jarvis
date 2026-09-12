@@ -8,9 +8,10 @@ const target = { pid: codex.pid, bundle_id: codex.bundleId }
 const chord = { ...target, key: '1', modifiers: ['cmd'] }
 
 function fixture() {
-	const state: DesktopState = { apps: [codex], frontmostPid: 7, accessibilityGranted: true }
+	const state: DesktopState = { apps: [codex], frontmostPid: 7, accessibilityGranted: true, generation: 0 }
 	const request = vi.fn(async (operation: string, args: Record<string, unknown> = {}): Promise<unknown> => {
 		if (operation === 'list_apps') return structuredClone(state)
+		if (operation === 'cancel_pending') { state.generation++; return null }
 		if (operation === 'activate_app') { state.frontmostPid = codex.pid; return null }
 		if (operation === 'send_shortcut') return { sent: true, effectVerified: false, ...args }
 		throw new Error('Unexpected operation')
@@ -28,7 +29,7 @@ describe('external app shortcuts', () => {
 		await f.run('desktop_list_apps')
 		expect(await f.run('desktop_send_shortcut', chord)).toMatchObject({ sent: true, effectVerified: false })
 		expect(f.request.mock.calls.map(([op]) => op)).toEqual(['list_apps', 'list_apps', 'activate_app', 'list_apps', 'send_shortcut'])
-		expect(f.request).toHaveBeenLastCalledWith('send_shortcut', { target: codex, shortcut: { key: '1', modifiers: ['cmd'] } })
+		expect(f.request).toHaveBeenLastCalledWith('send_shortcut', { target: codex, shortcut: { key: '1', modifiers: ['cmd'] }, generation: 0 })
 		expect(f.approve).not.toHaveBeenCalled()
 	})
 
@@ -119,6 +120,14 @@ describe('external app shortcuts', () => {
 		expect(explicitlyRequestsDesktopAction(utterance, codex, false, { key: '1', modifiers: ['cmd'] })).toBe(true)
 	})
 
+	it.each(['Notes', 'Notion', 'Keynote'])('does not mistake the app name %s for a negation', name => {
+		expect(explicitlyRequestsDesktopAction(`${name}でCmd+1`, { ...codex, name }, false, { key: '1', modifiers: ['cmd'] })).toBe(true)
+	})
+
+	it.each(["Codex: don't Cmd+1", 'Codex: do not Cmd+1', 'Codex: never Cmd+1', 'Codex: don’t Cmd+1'])('still requires confirmation for English negation: %s', utterance => {
+		expect(explicitlyRequestsDesktopAction(utterance, codex, false, { key: '1', modifiers: ['cmd'] })).toBe(false)
+	})
+
 	it.each(['CodexでCmd+2', 'CodexでCmd+12', 'CodexでCmd+Shift+1', 'ChromeでCmd+1', 'CodexでCmd+1を押さないで'])('does not silently send Cmd+1 for mismatched wording: %s', utterance => {
 		expect(explicitlyRequestsDesktopAction(utterance, codex, false, { key: '1', modifiers: ['cmd'] })).toBe(false)
 	})
@@ -128,12 +137,97 @@ describe('external app shortcuts', () => {
 		expect(explicitlyRequestsDesktopAction('今のアプリでCmd+1', codex, false, { key: '1', modifiers: ['cmd'] })).toBe(false)
 	})
 
+	it('requires confirmation instead of mixing shortcuts from multiple app actions', async () => {
+		const f = fixture()
+		const chrome = { pid: 43, bundleId: 'com.google.Chrome', name: 'Google Chrome' }
+		f.state.apps.push(chrome)
+		await f.run('desktop_list_apps')
+		for (const [utterance, args] of [
+			['CodexでCmd+1、ChromeでCtrl+Tab', { ...target, key: 'tab', modifiers: ['ctrl'] }],
+			['CodexでCmd+W、ChromeでCmd+1', { pid: chrome.pid, bundle_id: chrome.bundleId, key: 'w', modifiers: ['cmd'] }],
+			['Codexに切り替えて、ChromeでCmd+1', chord],
+		] as const) {
+			expect(await f.run('desktop_send_shortcut', { ...args, modifiers: [...args.modifiers] }, utterance)).toHaveProperty('error')
+		}
+		expect(f.approve).toHaveBeenCalledTimes(3)
+		expect(f.request.mock.calls.some(([op]) => op === 'activate_app' || op === 'send_shortcut')).toBe(false)
+	})
+
+	it('keeps a single Codex command explicit when the separate Code app is also running', async () => {
+		const f = fixture()
+		f.state.apps.push({ pid: 43, bundleId: 'com.microsoft.VSCode', name: 'Code' })
+		await f.run('desktop_list_apps')
+		expect(await f.run('desktop_send_shortcut', chord)).toMatchObject({ sent: true })
+		expect(f.approve).not.toHaveBeenCalled()
+	})
+
+	it('does not associate another app\'s single chord with the selected app when the other app is not running', async () => {
+		const f = fixture()
+		await f.run('desktop_list_apps')
+		expect(await f.run('desktop_send_shortcut', chord, 'Codexに切り替えてChromeでCmd+1')).toHaveProperty('error')
+		expect(f.approve).toHaveBeenCalledOnce()
+		expect(f.request.mock.calls.some(([op]) => op === 'activate_app' || op === 'send_shortcut')).toBe(false)
+	})
+
+	it('waits for native cancellation acknowledgement before obtaining a fresh generation', async () => {
+		const f = fixture()
+		let acknowledge: (() => void) | undefined
+		f.request.mockImplementation(async op => {
+			if (op === 'cancel_pending') return new Promise<void>(resolve => { acknowledge = () => { f.state.generation++; resolve() } })
+			return structuredClone(f.state)
+		})
+		f.controller.reset()
+		const pending = f.run('desktop_list_apps')
+		await Promise.resolve()
+		expect(f.request.mock.calls.map(([op]) => op)).toEqual(['cancel_pending'])
+		acknowledge!()
+		expect(await pending).toMatchObject({ generation: 1 })
+	})
+
+	it('fails closed if native cancellation cannot be acknowledged', async () => {
+		const f = fixture()
+		f.request.mockRejectedValueOnce(new Error('cancellation failed'))
+		f.controller.reset()
+		await expect(f.run('desktop_list_apps')).rejects.toThrow('cancellation failed')
+		expect(f.request.mock.calls.map(([op]) => op)).toEqual(['cancel_pending'])
+	})
+
 	it.each([{ key: 'hello', modifiers: ['cmd'] }, { key: '1', modifiers: [] }, { key: '1', modifiers: ['cmd', 'cmd'] }, { key: '1', modifiers: ['meta'] }, { key: '1', modifiers: 'cmd' }, { key: 'tab', modifiers: ['cmd'] }])('rejects unsupported key requests: %j', args => {
 		expect(() => parseDesktopShortcut(args)).toThrow()
 	})
 })
 
 describe('desktop tools in voice sessions', () => {
+	it('invalidates a shortcut already queued in the native layer when speech interrupts', async () => {
+		const f = fixture()
+		let queued: (() => void) | undefined
+		let posted = false
+		const original = f.request.getMockImplementation()!
+		f.request.mockImplementation(async (op, args = {}) => {
+			if (op === 'send_shortcut') return new Promise((resolve, reject) => {
+				queued = () => {
+					if (args.generation !== f.state.generation) { reject(new Error('native send cancelled')); return }
+					posted = true
+					resolve({ sent: true })
+				}
+			})
+			return original(op, args)
+		})
+		const events: RealtimeEvent[] = []
+		const runner = new BrowserToolRunner({ sendEvent: event => events.push(event) }, undefined, f.approve, undefined, undefined, f.controller)
+		runner.setUserUtterance('CodexでCmd+1')
+		runner.handle({ type: 'response.done', response: { id: 'list', status: 'completed', output: [{ type: 'function_call', call_id: 'list', name: 'desktop_list_apps', arguments: '{}' }] } })
+		await runner.settled()
+		runner.handle({ type: 'response.done', response: { id: 'send', status: 'completed', output: [{ type: 'function_call', call_id: 'send', name: 'desktop_send_shortcut', arguments: JSON.stringify(chord) }] } })
+		await vi.waitFor(() => expect(queued).toBeDefined())
+		runner.handle({ type: 'input_audio_buffer.speech_started' })
+		queued!()
+		await runner.settled()
+		expect(posted).toBe(false)
+		expect(f.state.generation).toBe(1)
+		expect(events.filter(event => event.type === 'conversation.item.create')).toHaveLength(1)
+	})
+
 	it.each([false, true])('shares the serialized voice runner and respects interruption (Live=%s)', async live => {
 		const f = fixture()
 		const events: RealtimeEvent[] = []
