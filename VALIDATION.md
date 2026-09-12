@@ -1,5 +1,14 @@
 # Validation
 
+## External macOS window management
+
+- Added Accessibility-backed enumeration and control for individual windows belonging to a previously observed running app: activate/restore, move, resize, minimize, and restore.
+- Window mutations require an opaque ID from the latest window listing, revalidate the app identity, honor voice interruption generations, and constrain requested bounds to a usable macOS display area. Window titles are treated as untrusted selection metadata.
+- `npm test`: 205 tests passed. `npm run build`, `npm run typecheck`, `cargo fmt --check`, targeted Rust desktop tests (5 passed), and `git diff --check` passed.
+- Not verified: live control of third-party application windows with a signed JARVIS build, behavior of apps exposing nonstandard Accessibility windows, or Intel macOS.
+
+2026-09-12 / macOS
+
 ## GPT Live 1 through Tachyon (PLT-4531)
 
 - Updated the default voice model to `gpt-live-1` with Responses delegation to `gpt-5.6-terra`. Explicit legacy Realtime models keep using the existing call endpoint.
