@@ -156,6 +156,14 @@ const EMPTY_TRANSPORT: Transport = {
 
 export const DEFAULT_REALTIME_MODEL = 'gpt-live-1'
 export const DEFAULT_LIVE_BACKEND_MODEL = 'gpt-5.6-terra'
+export const LIVE_BACKEND_MODELS = [
+	DEFAULT_LIVE_BACKEND_MODEL,
+	'gpt-6-astra',
+	'gpt-5.6-sol',
+	'gpt-5.6-luna',
+	'gpt-5.5',
+	'gpt-5.3-codex-spark',
+] as const
 export const normalizeRealtimeModel = (model: string) =>
 	model || DEFAULT_REALTIME_MODEL
 const DEFAULT_VOICE = 'marin'
