@@ -134,6 +134,10 @@ Keep this key stable across releases. Never commit it or put it in frontend envi
 Tauri's updater signature is separate from Apple Developer ID signing and notarization.
 Both are mandatory for a published desktop release.
 
+The release script explicitly uses 4 KiB macOS code-signature pages. macOS 26
+Tahoe can reject larger native binaries signed with the default 16 KiB pages
+even when userspace signature verification succeeds.
+
 Increment the version consistently in `package.json`, `src-tauri/Cargo.toml`, and
 `src-tauri/tauri.conf.json`, and refresh both lockfiles before building:
 
