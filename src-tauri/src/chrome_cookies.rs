@@ -369,7 +369,7 @@ mod platform {
                 && (!row.has_expires || expiry > now)
                 && row.value.is_empty()
         });
-        let mut key = if needs_key { Some(chrome_key()?) } else { None };
+        let key = if needs_key { Some(chrome_key()?) } else { None };
         let browser = crate::browser::ensure_webview(app, false)?;
         let mut result = CookieImportResult {
             domain,
