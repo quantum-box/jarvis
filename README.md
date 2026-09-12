@@ -21,6 +21,8 @@ Tauri版のAPI通信には公式HTTPプラグインを使います。
 
 「会話をはじめる」でマイクを許可すると音声対話が始まります。GPT Liveでは音声入力を使います。終了時は `session.close` の完了を待ってから、マイク、音声再生、WebRTCを解放します。
 
+接続設定の「JARVISの声」で声を選び、「設定を保存」を押すと端末に保存され、次の会話開始時から反映されます。会話中に変更した場合は、いったん終了してから「会話をはじめる」を押してください。GPT Liveではセッション作成時の `audio.output.voice` に設定します（[OpenAI公式の音声設定仕様](https://developers.openai.com/api/docs/guides/live-conversations#configure-a-session)）。
+
 会話モデルとTachyon API URLはアプリで固定しています。Responses delegationのバックエンドモデルは接続設定から選択でき、既定値は `gpt-5.6-terra` です。Tachyonの `POST /v1/llms/chatrooms/{chatroom_id}/agent/live/session` が必要です。対応issue: [PLT-4531](https://linear.app/issue/PLT-4531)。
 
 - 選択したテナントや会話設定はローカルに保存します。macOS/iOSではrefresh tokenとユーザー名をOSのキーチェーンに保存し、再起動時にCognitoで更新してログイン状態を復元します。パスワード・access token・ID tokenは永続化しません。ブラウザーおよびその他のOSではセッションはメモリ内のみです。access tokenは有効期限の30秒前から必要時に更新します。ログアウト・refresh token失効時は保存情報を削除し、一時的な通信障害では保持します。ログアウト時の失効APIはbest effortです。

@@ -167,7 +167,7 @@ export const LIVE_BACKEND_MODELS = [
 ] as const
 export const normalizeRealtimeModel = (model: string) =>
 	model || DEFAULT_REALTIME_MODEL
-const DEFAULT_VOICE = 'marin'
+export const DEFAULT_VOICE = 'marin'
 const DEFAULT_STARTUP_TIMEOUTS: RealtimeStartupTimeouts = {
 	microphoneMs: 30_000,
 	localDescriptionMs: 15_000,
@@ -818,6 +818,7 @@ export class Realtime {
 							provider: 'openai',
 							session: {
 								model: this.settings.model,
+								audio: { output: { voice: this.settings.voice } },
 								instructions: this.settings.instructions || undefined,
 								delegation: {
 									type: 'responses',

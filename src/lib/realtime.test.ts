@@ -170,6 +170,38 @@ describe('Realtime', () => {
 		}
 	})
 
+	it.each([
+		['gpt-live-1', 'cedar', 'cedar'],
+		['gpt-live-1', 'ash', 'ash'],
+		['gpt-live-1', '', 'marin'],
+		['', 'cedar', 'cedar'],
+		['gpt-realtime-2.1', 'cedar', 'cedar'],
+		['gpt-realtime-2.1', '', 'marin'],
+	])('sends voice "%s / %s" as %s when starting a conversation', async (model, voice, expected) => {
+		const transport = makeTransport()
+		const live = normalizeRealtimeModel(model) === DEFAULT_REALTIME_MODEL
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(live
+			? new Response(JSON.stringify({
+				session: { id: 'live_voice' },
+				transport: { type: 'webrtc', sdp: 'v=0 live answer' },
+			}), { status: 201, headers: { 'Content-Type': 'application/json' } })
+			: response(),
+		)
+		const client = new Realtime({ ...settings, model, voice }, {}, {
+			fetch: fetchMock,
+			createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+			getUserMedia: vi.fn(async () => transport.stream),
+		})
+		try {
+			await client.start()
+			const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)
+			expect(live ? body.session.audio.output.voice : body.voice).toBe(expected)
+		} finally {
+			transport.dataChannel.readyState = 'closed'
+			await client.stop()
+		}
+	})
+
 	it('creates a GPT Live session with Responses delegation and waits for session.started', async () => {
 		const transport = makeTransport()
 		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X, ShieldCheck } from "lucide-react";
-import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL, LIVE_BACKEND_MODELS } from "../lib/realtime";
+import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL, DEFAULT_VOICE, LIVE_BACKEND_MODELS } from "../lib/realtime";
 import { BrowserSettings } from "./BrowserSettings";
 import { DesktopSettings } from "./DesktopSettings";
 export interface ConnectionSettings {
@@ -21,6 +21,7 @@ const PERSISTED_SETTING_KEYS = [
   "cognitoClientId",
   "chatroomId",
   "backendModel",
+  "voice",
   "instructions",
 ] as const satisfies readonly (keyof ConnectionSettings)[];
 export const defaults: ConnectionSettings = {
@@ -31,7 +32,7 @@ export const defaults: ConnectionSettings = {
   chatroomId: "",
   model: DEFAULT_REALTIME_MODEL,
   backendModel: DEFAULT_LIVE_BACKEND_MODEL,
-  voice: "marin",
+  voice: DEFAULT_VOICE,
   instructions:
     "あなたはJARVIS。落ち着いた有能なパーソナルAIアシスタントです。日本語で短く自然に話し、必要な時は機転の利いた軽いユーモアを添えてください。実行していない操作を完了したと言わないでください。",
 };
@@ -127,6 +128,34 @@ export function Settings({
       </p>
       {appUpdate}
       <div className="settings-fields">
+        <div>
+          <label>
+            JARVISの声
+            <select
+              value={value.voice || DEFAULT_VOICE}
+              onChange={(e) => onChange({ ...value, voice: e.target.value })}
+              aria-describedby="voice-setting-help"
+            >
+              {[
+                "marin",
+                "cedar",
+                "ash",
+                "verse",
+                "alloy",
+                "sage",
+                "coral",
+                "echo",
+                "shimmer",
+                "ballad",
+              ].map((v) => (
+                <option key={v} value={v}>{v}{v === DEFAULT_VOICE ? "（標準）" : ""}</option>
+              ))}
+            </select>
+          </label>
+          <p id="voice-setting-help" className="muted">
+            声の変更は次の会話開始時に反映されます。会話中の場合は、いったん終了してから「会話をはじめる」を押してください。
+          </p>
+        </div>
         {tenants.length ? <label>利用するテナント<select value={value.tenantId} onChange={e => onChange({...value, tenantId: e.target.value, chatroomId: ''})}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label> : field("tenantId", "Tenant ID", "ログイン後に取得します")}
         {!signedIn && <details><summary>ログイン接続設定</summary><div className="settings-fields">{field('cognitoRegion', 'Cognito region')}{field('cognitoClientId', 'Cognito public client ID', 'Tachyonと共通の公開クライアントID')}</div></details>}
         {field("chatroomId", "Chatroom ID", "空欄ならこの起動中の初回に自動作成")}
