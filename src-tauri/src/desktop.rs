@@ -57,7 +57,7 @@ pub struct DesktopWindowsState {
     screens: Vec<DesktopScreen>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesktopBoundsUpdate {
     x: Option<f64>,
@@ -479,13 +479,18 @@ mod platform {
 
     fn screens() -> Result<Vec<DesktopScreen>, String> {
         let marker = MainThreadMarker::new().ok_or("ディスプレイ情報を確認できません。")?;
-        let primary_top = NSScreen::mainScreen(marker)
+        let screens = NSScreen::screens(marker);
+        // AppKit orders the menu-bar (coordinate-system primary) display first.
+        // mainScreen instead follows the current key window and may be secondary.
+        let primary_top = screens
+            .iter()
+            .next()
             .map(|screen| {
                 let frame = screen.frame();
                 frame.origin.y + frame.size.height
             })
             .unwrap_or(0.0);
-        Ok(NSScreen::screens(marker)
+        Ok(screens
             .iter()
             .enumerate()
             .map(|(index, screen)| {
@@ -718,11 +723,16 @@ mod platform {
         if observed.minimized {
             set_ax_bool(element_ref, "AXMinimized", false)?;
         }
-        let _ = set_ax_bool(element_ref, "AXMain", true);
-        let _ = set_ax_bool(element_ref, "AXFocused", true);
+        set_ax_bool(element_ref, "AXMain", true)?;
+        set_ax_bool(element_ref, "AXFocused", true)?;
         perform_ax_action(element_ref, "AXRaise")?;
         activate(identity.clone())?;
         update_stored_window(id, element_ref, identity)
+    }
+
+    pub fn get_window(id: String, identity: DesktopApp) -> Result<DesktopWindow, String> {
+        let (element, _) = stored_window(&id, &identity)?;
+        update_stored_window(&id, element.as_CFTypeRef() as AXUIElementRef, &identity)
     }
 
     pub fn activate_window(
@@ -757,17 +767,24 @@ mod platform {
         generation: u64,
     ) -> Result<DesktopWindow, String> {
         EXECUTION.run(generation, || {
-            let (element, observed) = stored_window(&id, &identity)?;
+            let (element, _) = stored_window(&id, &identity)?;
             let available = screens()?;
-            let bounds = fit_bounds(validated_bounds(observed.bounds, update)?, &available);
             let element_ref = element.as_CFTypeRef() as AXUIElementRef;
-            set_ax_size(
-                element_ref,
-                AXSize {
-                    width: bounds.width,
-                    height: bounds.height,
-                },
-            )?;
+            // Preserve omitted fields from the live AX state, not the earlier list
+            // snapshot, because either the user or the app may have moved it since.
+            let current = ax_bounds(element_ref)?;
+            let resize_requested = update.width.is_some() || update.height.is_some();
+            let position_requested = update.x.is_some() || update.y.is_some();
+            let bounds = fit_bounds(validated_bounds(current, update)?, &available);
+            if resize_requested {
+                set_ax_size(
+                    element_ref,
+                    AXSize {
+                        width: bounds.width,
+                        height: bounds.height,
+                    },
+                )?;
+            }
             // Apps may enforce a larger minimum size than requested. Read the
             // applied size before positioning so the right/bottom edge stays visible.
             let applied_size = ax_size(element_ref, "AXSize")?;
@@ -780,13 +797,15 @@ mod platform {
                 },
                 &available,
             );
-            set_ax_point(
-                element_ref,
-                AXPoint {
-                    x: positioned.x,
-                    y: positioned.y,
-                },
-            )?;
+            if position_requested || positioned.x != current.x || positioned.y != current.y {
+                set_ax_point(
+                    element_ref,
+                    AXPoint {
+                        x: positioned.x,
+                        y: positioned.y,
+                    },
+                )?;
+            }
             update_stored_window(&id, element_ref, &identity)
         })?
     }
@@ -938,6 +957,23 @@ pub async fn desktop_activate_window(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, id, target, generation);
+        Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_get_window(
+    app: AppHandle,
+    id: String,
+    target: DesktopApp,
+) -> Result<DesktopWindow, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, move || platform::get_window(id, target)).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, target);
         Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
     }
 }

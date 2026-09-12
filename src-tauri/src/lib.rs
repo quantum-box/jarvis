@@ -82,6 +82,7 @@ pub fn run() {
             desktop::desktop_list_windows,
             desktop::desktop_activate_app,
             desktop::desktop_activate_window,
+            desktop::desktop_get_window,
             desktop::desktop_set_window_bounds,
             desktop::desktop_set_window_minimized,
             desktop::desktop_send_shortcut,

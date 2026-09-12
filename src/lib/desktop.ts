@@ -174,12 +174,11 @@ export function explicitlyRequestsDesktopAction(utterance: string, app: DesktopA
 }
 
 const windowActionWords: Record<string, RegExp> = {
-	desktop_activate_window: /切り替|前面|手前|表示|見せ|開い|activate|switch|focus|show/i,
-	desktop_set_window_bounds: /移動|寄せ|幅|高さ|サイズ|大き|小さ|並べ|(?:左|右|上|下)(?:側)?(?:半分|半面|へ|に)|move|resize|width|height|half|third|quarter/i,
-	desktop_set_window_minimized: /最小化|元に戻|復元|minimi[sz]e|restore|unminimi[sz]e/i,
+	desktop_activate_window: /切り替|前面(?:に|へ)(?:表示|出|持って|して)|手前(?:に|へ)(?:表示|出|持って|して)|表示して|見せて|開いて|activate|switch|focus|show/i,
+	desktop_set_window_bounds: /移動|動か|寄せ|並べ|配置|置い|(?:左|右|上|下)(?:側)?(?:半分|半面)?(?:に|へ)(?:して|移して|持って)|(?:幅|高さ|サイズ|大きさ)(?:を)?(?:[0-9.]+(?:px)?に)?(?:して|変更|変え|調整)|(?:大き|小さ)くして|広げ|縮め|move|resize|arrange|place|put|set(?:the)?(?:width|height|size)|make(?:it)?(?:larger|smaller)/i,
 }
 
-function explicitlyRequestsDesktopWindowAction(name: string, utterance: string, selected: DesktopWindow, windows: DesktopWindow[]) {
+function explicitlyRequestsDesktopWindowAction(name: string, utterance: string, selected: DesktopWindow, windows: DesktopWindow[], minimized?: boolean) {
 	const normalized = normalize(utterance)
 	if (/(しない|しなく|やめ|最小化しない|移動しない|戻さない|ではなく|じゃなく|ないで)/.test(normalized) ||
 		/\b(not|don['’]?t|never|cancel)\b/i.test(utterance.normalize('NFKC'))) return false
@@ -189,9 +188,15 @@ function explicitlyRequestsDesktopWindowAction(name: string, utterance: string, 
 	const actionText = [selected.title, selected.appName, selected.bundleId, selected.appName.replace(/^(Google|Microsoft) /, '')]
 		.map(normalize).filter(value => value.length >= 2)
 		.reduce((text, label) => text.split(label).join(''), normalized)
-	if (!windowActionWords[name]?.test(actionText)) return false
+	const actionWords = name === 'desktop_set_window_minimized'
+		? minimized
+			? /最小化(?!を?解除)|(?<!un)minimi[sz]e/i
+			: /元に戻|復元|最小化(?:を)?解除|restore|unminimi[sz]e/i
+		: windowActionWords[name]
+	if (!actionWords?.test(actionText)) return false
 	const siblings = windows.filter(window => window.pid === selected.pid)
-	const namesWindow = Boolean(title && title.length >= 2 && normalized.includes(title)) ||
+	const titleIsUnique = Boolean(title && siblings.filter(window => normalize(window.title) === title).length === 1)
+	const namesWindow = Boolean(titleIsUnique && normalized.includes(title)) ||
 		(selected.focused && /このウィンドウ|今のウィンドウ|現在のウィンドウ|手前のウィンドウ|thiswindow|currentwindow|frontmostwindow/.test(normalized)) ||
 		(siblings.length === 1 && mentionsApp(normalizeWords(utterance), { pid: selected.pid, bundleId: selected.bundleId, name: selected.appName }))
 	if (namesWindow) return true
@@ -313,11 +318,12 @@ export class DesktopToolController {
 		if (!app) throw new Error('対象アプリの一覧が古くなりました。もう一度確認してください。')
 		const bounds = name === 'desktop_set_window_bounds' ? parseDesktopWindowBounds(args) : undefined
 		if (name === 'desktop_set_window_minimized' && typeof args.minimized !== 'boolean') throw new Error('最小化するか復元するかを指定してください。')
+		const minimized = name === 'desktop_set_window_minimized' ? args.minimized as boolean : undefined
 		const state = await this.request<DesktopState>('list_apps')
 		assertCurrent()
 		this.checkTarget(state, app, true)
-		if (!explicitlyRequestsDesktopWindowAction(name, utterance, window, [...this.windows.values()])) {
-			const detail = bounds ? JSON.stringify(bounds) : name === 'desktop_set_window_minimized' ? (args.minimized ? '最小化' : '復元') : '前面に表示'
+		if (!explicitlyRequestsDesktopWindowAction(name, utterance, window, [...this.windows.values()], minimized)) {
+			const detail = bounds ? JSON.stringify(bounds) : name === 'desktop_set_window_minimized' ? (minimized ? '最小化' : '復元') : '前面に表示'
 			const approved = await this.approve({
 				id: `desktop-window-${Date.now()}`,
 				operation: name,
@@ -329,12 +335,25 @@ export class DesktopToolController {
 		}
 		const requestArgs: Record<string, unknown> = { id: window.id, target: app, generation: state.generation }
 		if (bounds) requestArgs.bounds = bounds
-		if (name === 'desktop_set_window_minimized') requestArgs.minimized = args.minimized
+		if (name === 'desktop_set_window_minimized') requestArgs.minimized = minimized
 		assertCurrent()
-		const updated = await this.request<DesktopWindow>(name.slice('desktop_'.length), requestArgs)
+		let updated = await this.request<DesktopWindow>(name.slice('desktop_'.length), requestArgs)
 		assertCurrent()
 		this.windows.set(updated.id, updated)
-		return updated
+		const expectsActivation = name === 'desktop_activate_window' || (name === 'desktop_set_window_minimized' && minimized === false)
+		if (!expectsActivation) return updated
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const currentState = await this.request<DesktopState>('list_apps')
+			assertCurrent()
+			this.checkTarget(currentState, app, true)
+			updated = await this.request<DesktopWindow>('get_window', { id: window.id, target: app })
+			assertCurrent()
+			this.windows.set(updated.id, updated)
+			if (currentState.frontmostPid === app.pid && !updated.minimized && (updated.main || updated.focused)) return updated
+			await this.delay()
+			assertCurrent()
+		}
+		throw new Error('対象ウィンドウが前面になったことを確認できませんでした。')
 	}
 
 	private checkTarget(state: DesktopState, app: DesktopApp, needsAccessibility: boolean) {

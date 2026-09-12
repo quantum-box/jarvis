@@ -24,15 +24,18 @@ function fixture() {
 		if (operation === 'activate_app') { state.frontmostPid = codex.pid; return null }
 		const selected = windows.find(window => window.id === args.id)
 		if (operation === 'activate_window' && selected) {
+			state.frontmostPid = selected.pid
 			selected.minimized = false; selected.main = true; selected.focused = true
 			return structuredClone(selected)
 		}
+		if (operation === 'get_window' && selected) return structuredClone(selected)
 		if (operation === 'set_window_bounds' && selected) {
 			selected.bounds = { ...selected.bounds, ...(args.bounds as object) }
 			return structuredClone(selected)
 		}
 		if (operation === 'set_window_minimized' && selected) {
 			selected.minimized = args.minimized as boolean
+			if (!selected.minimized) { state.frontmostPid = selected.pid; selected.main = true; selected.focused = true }
 			return structuredClone(selected)
 		}
 		if (operation === 'send_shortcut') return { sent: true, effectVerified: false, ...args }
@@ -238,7 +241,8 @@ describe('external window management', () => {
 		expect(await f.run('desktop_set_window_bounds', { window_id, bounds: { x: 0, width: 720 } }, 'Settingsウィンドウを左へ移動して幅を720にして')).toMatchObject({ bounds: { x: 0, width: 720 } })
 		expect(await f.run('desktop_set_window_minimized', { window_id, minimized: true }, 'Settingsウィンドウを最小化して')).toMatchObject({ minimized: true })
 		expect(await f.run('desktop_activate_window', { window_id }, 'Settingsウィンドウを前面に表示して')).toMatchObject({ minimized: false, focused: true })
-		expect(f.request).toHaveBeenLastCalledWith('activate_window', { id: window_id, target: codex, generation: 0 })
+		expect(f.request).toHaveBeenCalledWith('activate_window', { id: window_id, target: codex, generation: 0 })
+		expect(f.request).toHaveBeenLastCalledWith('get_window', { id: window_id, target: codex })
 		expect(f.approve).not.toHaveBeenCalled()
 	})
 
@@ -266,6 +270,52 @@ describe('external window management', () => {
 		expect(await f.run('desktop_set_window_minimized', { window_id: f.windows[1].id, minimized: true }, 'Codexのウィンドウを最小化して')).toMatchObject({ retryAutomatically: false })
 		expect(f.approve).toHaveBeenCalledOnce()
 		expect(f.request.mock.calls.some(([operation]) => operation === 'set_window_minimized')).toBe(false)
+	})
+
+	it('uses confirmation when duplicate titles do not identify one window', async () => {
+		const f = fixture()
+		f.windows.push({ ...f.windows[0], id: 'external-window-2', focused: false, main: false, bounds: { ...f.windows[0].bounds, x: 800 } })
+		await f.run('desktop_list_apps')
+		await f.run('desktop_list_windows', target)
+		expect(await f.run('desktop_activate_window', { window_id: f.windows[1].id }, 'Settingsウィンドウを前面に表示して')).toMatchObject({ retryAutomatically: false })
+		expect(f.approve).toHaveBeenCalledOnce()
+		expect(f.request.mock.calls.some(([operation]) => operation === 'activate_window')).toBe(false)
+	})
+
+	it.each([
+		{ request: { minimized: true }, utterance: 'Settingsウィンドウを復元して' },
+		{ request: { minimized: false }, utterance: 'Settingsウィンドウを最小化して' },
+	])('binds authorization to the requested minimized state', async ({ request, utterance }) => {
+		const f = fixture()
+		await f.run('desktop_list_apps')
+		await f.run('desktop_list_windows', target)
+		expect(await f.run('desktop_set_window_minimized', { window_id: f.windows[0].id, ...request }, utterance)).toMatchObject({ retryAutomatically: false })
+		expect(f.approve).toHaveBeenCalledOnce()
+		expect(f.request.mock.calls.some(([operation]) => operation === 'set_window_minimized')).toBe(false)
+	})
+
+	it('does not treat a positional question as an explicit move request', async () => {
+		const f = fixture()
+		await f.run('desktop_list_apps')
+		await f.run('desktop_list_windows', target)
+		expect(await f.run('desktop_set_window_bounds', { window_id: f.windows[0].id, bounds: { x: 0 } }, 'Settingsウィンドウは左にありますか')).toMatchObject({ retryAutomatically: false })
+		expect(f.approve).toHaveBeenCalledOnce()
+		expect(f.request.mock.calls.some(([operation]) => operation === 'set_window_bounds')).toBe(false)
+	})
+
+	it('fails when window activation cannot be verified', async () => {
+		const f = fixture()
+		const original = f.request.getMockImplementation()!
+		f.request.mockImplementation(async (operation, args = {}) => {
+			const result = await original(operation, args)
+			if (operation === 'activate_window') f.state.frontmostPid = 7
+			if (operation === 'get_window') return { ...(result as DesktopWindow), main: false, focused: false }
+			return result
+		})
+		await f.run('desktop_list_apps')
+		await f.run('desktop_list_windows', target)
+		await expect(f.run('desktop_activate_window', { window_id: f.windows[0].id }, 'Settingsウィンドウを前面に表示して')).rejects.toThrow('確認できません')
+		expect(f.request.mock.calls.filter(([operation]) => operation === 'get_window')).toHaveLength(20)
 	})
 
 	it('does not treat action words inside untrusted app or window labels as authorization', async () => {
