@@ -29,6 +29,8 @@ describe('isConversationEndRequest', () => {
 		'終了しないで',
 		'ウィンドウを閉じて',
 		'この話の続きを教えて',
+		'昔話を終えて',
+		'その話を終えて',
 		'ありがとう',
 		'またねって英語で何て言う？',
 		"Don't end the conversation",

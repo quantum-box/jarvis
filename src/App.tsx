@@ -286,7 +286,7 @@ export default function App() {
     });
     client.current = next;
     browserTools.current = browserAvailable
-      ? new BrowserToolRunner(next, browserRequest, async () => true, setError)
+      ? new BrowserToolRunner(next, browserRequest, async () => false, setError)
       : null;
     browserTools.current?.setSuspended(browserExecutionObscured);
     try {

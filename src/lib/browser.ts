@@ -477,7 +477,7 @@ export class BrowserToolRunner {
 			.then(async () => {
 				let executed = false
 				for (const call of calls) {
-					if (!this.active) return
+					if (!this.active || (protocol === 'realtime' && generation !== this.generation)) return
 					if (!call.call_id || this.seen.has(call.call_id)) continue
 					this.seen.add(call.call_id)
 					executed = true
@@ -490,7 +490,7 @@ export class BrowserToolRunner {
 					// A pending function call must always receive an output while the Live
 					// session is active. Otherwise the delegated response remains blocked
 					// after an interruption and later user turns receive no response.
-					if (!this.active) return
+					if (!this.active || (protocol === 'realtime' && generation !== this.generation)) return
 					this.client.sendEvent({
 						type: protocol === 'live' ? 'response.item.create' : 'conversation.item.create',
 						item: {
@@ -500,7 +500,11 @@ export class BrowserToolRunner {
 						},
 					})
 				}
-				if (this.active && executed) {
+				if (
+					this.active &&
+					executed &&
+					(protocol === 'live' || generation === this.generation)
+				) {
 					this.client.sendEvent({ type: 'response.create' })
 				}
 			})

@@ -383,6 +383,7 @@ describe('Realtime', () => {
 		expect(transcripts).toMatchObject([
 			{ id: 'live:user:0', role: 'user', text: 'Hello', final: false },
 			{ id: 'live:user:0', role: 'user', text: 'Hello there', final: false },
+			{ id: 'live:user:0', role: 'user', text: 'Hello there', final: true },
 			{ id: 'live:assistant:0', role: 'assistant', text: 'Hi', final: false },
 			{ id: 'live:assistant:1', role: 'assistant', text: ' again', final: false },
 		])
