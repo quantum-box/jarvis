@@ -18,6 +18,54 @@ pub struct DesktopState {
     generation: u64,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindow {
+    id: String,
+    pid: i32,
+    bundle_id: String,
+    app_name: String,
+    title: String,
+    minimized: bool,
+    main: bool,
+    focused: bool,
+    bounds: DesktopBounds,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopScreen {
+    id: String,
+    name: String,
+    bounds: DesktopBounds,
+    visible_bounds: DesktopBounds,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindowsState {
+    windows: Vec<DesktopWindow>,
+    screens: Vec<DesktopScreen>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopBoundsUpdate {
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+}
+
 #[cfg(any(target_os = "macos", test))]
 struct ExecutionState(std::sync::Mutex<u64>);
 
@@ -150,19 +198,227 @@ fn shortcut_event(shortcut: &Shortcut) -> Result<(u16, u64), String> {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
+    use core_foundation::{
+        array::CFArray,
+        base::{CFRelease, CFRetain, CFType, CFTypeRef, TCFType},
+        boolean::CFBoolean,
+        string::{CFString, CFStringRef},
+    };
     use objc2::{rc::Retained, MainThreadMarker};
     use objc2_app_kit::{
         NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
-        NSWorkspace,
+        NSScreen, NSWorkspace,
     };
     use objc2_core_graphics::{
         CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID, CGPreflightPostEventAccess,
         CGRequestPostEventAccess,
     };
     use objc2_foundation::{NSString, NSURL};
+    use std::{
+        collections::HashMap,
+        ffi::c_void,
+        ptr,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Mutex, OnceLock,
+        },
+    };
     use tokio::sync::oneshot;
 
     static EXECUTION: ExecutionState = ExecutionState::new();
+    static WINDOW_REGISTRY: OnceLock<Mutex<HashMap<String, StoredWindow>>> = OnceLock::new();
+    static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
+
+    type AXUIElementRef = *const c_void;
+    type AXValueRef = *const c_void;
+    type AXError = i32;
+
+    const AX_SUCCESS: AXError = 0;
+    const AX_VALUE_CGPOINT: u32 = 1;
+    const AX_VALUE_CGSIZE: u32 = 2;
+    const MIN_WINDOW_WIDTH: f64 = 100.0;
+    const MIN_WINDOW_HEIGHT: f64 = 80.0;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct AXPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct AXSize {
+        width: f64,
+        height: f64,
+    }
+
+    struct StoredWindow {
+        element: usize,
+        window: DesktopWindow,
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
+        fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+        fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> AXError;
+        fn AXUIElementCopyAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> AXError;
+        fn AXUIElementSetAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: CFTypeRef,
+        ) -> AXError;
+        fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+        fn AXValueCreate(value_type: u32, value: *const c_void) -> AXValueRef;
+        fn AXValueGetValue(value: AXValueRef, value_type: u32, output: *mut c_void) -> u8;
+    }
+
+    fn window_registry() -> &'static Mutex<HashMap<String, StoredWindow>> {
+        WINDOW_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn accessibility_granted() -> bool {
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    fn ax_error(error: AXError, operation: &str) -> String {
+        let reason = match error {
+            -25202 => "対象ウィンドウが閉じられました",
+            -25204 => "対象アプリが応答しませんでした",
+            -25205 => "対象ウィンドウがこの属性に対応していません",
+            -25206 => "対象ウィンドウがこの操作に対応していません",
+            -25211 => "macOSのアクセシビリティ権限がありません",
+            -25212 => "対象ウィンドウから値を取得できませんでした",
+            _ => "macOSのウィンドウ操作に失敗しました",
+        };
+        format!("{operation}: {reason} ({error})")
+    }
+
+    fn ax_attribute(element: AXUIElementRef, name: &str) -> Result<CFType, String> {
+        let attribute = CFString::new(name);
+        let mut value: CFTypeRef = ptr::null();
+        let error = unsafe {
+            AXUIElementCopyAttributeValue(element, attribute.as_concrete_TypeRef(), &mut value)
+        };
+        if error != AX_SUCCESS || value.is_null() {
+            return Err(ax_error(error, name));
+        }
+        Ok(unsafe { CFType::wrap_under_create_rule(value) })
+    }
+
+    fn ax_attribute_optional(element: AXUIElementRef, name: &str) -> Option<CFType> {
+        ax_attribute(element, name).ok()
+    }
+
+    fn ax_string(element: AXUIElementRef, name: &str) -> Option<String> {
+        ax_attribute_optional(element, name)?
+            .downcast::<CFString>()
+            .map(|value| value.to_string())
+    }
+
+    fn ax_bool(element: AXUIElementRef, name: &str) -> bool {
+        ax_attribute_optional(element, name)
+            .and_then(|value| value.downcast::<CFBoolean>())
+            .map(bool::from)
+            .unwrap_or(false)
+    }
+
+    fn ax_point(element: AXUIElementRef, name: &str) -> Result<AXPoint, String> {
+        let value = ax_attribute(element, name)?;
+        let mut point = AXPoint::default();
+        if unsafe {
+            AXValueGetValue(
+                value.as_CFTypeRef() as AXValueRef,
+                AX_VALUE_CGPOINT,
+                &mut point as *mut AXPoint as *mut c_void,
+            )
+        } == 0
+        {
+            return Err(format!("{name}: 位置を読み取れませんでした。"));
+        }
+        Ok(point)
+    }
+
+    fn ax_size(element: AXUIElementRef, name: &str) -> Result<AXSize, String> {
+        let value = ax_attribute(element, name)?;
+        let mut size = AXSize::default();
+        if unsafe {
+            AXValueGetValue(
+                value.as_CFTypeRef() as AXValueRef,
+                AX_VALUE_CGSIZE,
+                &mut size as *mut AXSize as *mut c_void,
+            )
+        } == 0
+        {
+            return Err(format!("{name}: 大きさを読み取れませんでした。"));
+        }
+        Ok(size)
+    }
+
+    fn ax_bounds(element: AXUIElementRef) -> Result<DesktopBounds, String> {
+        let position = ax_point(element, "AXPosition")?;
+        let size = ax_size(element, "AXSize")?;
+        Ok(DesktopBounds {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        })
+    }
+
+    fn set_ax_attribute(
+        element: AXUIElementRef,
+        name: &str,
+        value: CFTypeRef,
+    ) -> Result<(), String> {
+        let attribute = CFString::new(name);
+        let error = unsafe {
+            AXUIElementSetAttributeValue(element, attribute.as_concrete_TypeRef(), value)
+        };
+        if error == AX_SUCCESS {
+            Ok(())
+        } else {
+            Err(ax_error(error, name))
+        }
+    }
+
+    fn set_ax_bool(element: AXUIElementRef, name: &str, value: bool) -> Result<(), String> {
+        let value = CFBoolean::from(value);
+        set_ax_attribute(element, name, value.as_CFTypeRef())
+    }
+
+    fn set_ax_point(element: AXUIElementRef, point: AXPoint) -> Result<(), String> {
+        let value = unsafe { AXValueCreate(AX_VALUE_CGPOINT, &point as *const AXPoint as _) };
+        if value.is_null() {
+            return Err("ウィンドウ位置を作成できませんでした。".into());
+        }
+        let value = unsafe { CFType::wrap_under_create_rule(value as CFTypeRef) };
+        set_ax_attribute(element, "AXPosition", value.as_CFTypeRef())
+    }
+
+    fn set_ax_size(element: AXUIElementRef, size: AXSize) -> Result<(), String> {
+        let value = unsafe { AXValueCreate(AX_VALUE_CGSIZE, &size as *const AXSize as _) };
+        if value.is_null() {
+            return Err("ウィンドウサイズを作成できませんでした。".into());
+        }
+        let value = unsafe { CFType::wrap_under_create_rule(value as CFTypeRef) };
+        set_ax_attribute(element, "AXSize", value.as_CFTypeRef())
+    }
+
+    fn perform_ax_action(element: AXUIElementRef, action: &str) -> Result<(), String> {
+        let action = CFString::new(action);
+        let error = unsafe { AXUIElementPerformAction(element, action.as_concrete_TypeRef()) };
+        if error == AX_SUCCESS {
+            Ok(())
+        } else {
+            Err(ax_error(error, action.to_string().as_str()))
+        }
+    }
 
     pub fn cancel_pending() -> Result<(), String> {
         EXECUTION.cancel()
@@ -206,6 +462,354 @@ mod platform {
         Ok(app)
     }
 
+    fn appkit_rect_to_ax(
+        origin_x: f64,
+        origin_y: f64,
+        width: f64,
+        height: f64,
+        primary_top: f64,
+    ) -> DesktopBounds {
+        DesktopBounds {
+            x: origin_x,
+            y: primary_top - origin_y - height,
+            width,
+            height,
+        }
+    }
+
+    fn screens() -> Result<Vec<DesktopScreen>, String> {
+        let marker = MainThreadMarker::new().ok_or("ディスプレイ情報を確認できません。")?;
+        let screens = NSScreen::screens(marker);
+        // AppKit orders the menu-bar (coordinate-system primary) display first.
+        // mainScreen instead follows the current key window and may be secondary.
+        let primary_top = screens
+            .iter()
+            .next()
+            .map(|screen| {
+                let frame = screen.frame();
+                frame.origin.y + frame.size.height
+            })
+            .unwrap_or(0.0);
+        Ok(screens
+            .iter()
+            .enumerate()
+            .map(|(index, screen)| {
+                let frame = screen.frame();
+                let visible = screen.visibleFrame();
+                DesktopScreen {
+                    id: format!("screen-{index}"),
+                    name: screen.localizedName().to_string(),
+                    bounds: appkit_rect_to_ax(
+                        frame.origin.x,
+                        frame.origin.y,
+                        frame.size.width,
+                        frame.size.height,
+                        primary_top,
+                    ),
+                    visible_bounds: appkit_rect_to_ax(
+                        visible.origin.x,
+                        visible.origin.y,
+                        visible.size.width,
+                        visible.size.height,
+                        primary_top,
+                    ),
+                }
+            })
+            .collect())
+    }
+
+    fn describe_window(
+        element: AXUIElementRef,
+        id: String,
+        app: &DesktopApp,
+    ) -> Result<DesktopWindow, String> {
+        Ok(DesktopWindow {
+            id,
+            pid: app.pid,
+            bundle_id: app.bundle_id.clone(),
+            app_name: app.name.clone(),
+            title: ax_string(element, "AXTitle").unwrap_or_default(),
+            minimized: ax_bool(element, "AXMinimized"),
+            main: ax_bool(element, "AXMain"),
+            focused: ax_bool(element, "AXFocused"),
+            bounds: ax_bounds(element)?,
+        })
+    }
+
+    fn replace_window_registry(
+        described: Vec<(AXUIElementRef, DesktopWindow)>,
+    ) -> Result<Vec<DesktopWindow>, String> {
+        let mut registry = window_registry()
+            .lock()
+            .map_err(|_| "ウィンドウ一覧を更新できません。")?;
+        for (_, stored) in registry.drain() {
+            unsafe { CFRelease(stored.element as CFTypeRef) };
+        }
+        let windows = described
+            .into_iter()
+            .map(|(element, window)| {
+                unsafe { CFRetain(element as CFTypeRef) };
+                registry.insert(
+                    window.id.clone(),
+                    StoredWindow {
+                        element: element as usize,
+                        window: window.clone(),
+                    },
+                );
+                window
+            })
+            .collect();
+        Ok(windows)
+    }
+
+    fn stored_window(id: &str, identity: &DesktopApp) -> Result<(CFType, DesktopWindow), String> {
+        let _app = target(identity)?;
+        if !accessibility_granted() {
+            return Err(
+                "ウィンドウ操作にはmacOSのアクセシビリティでJARVISの許可が必要です。".into(),
+            );
+        }
+        let registry = window_registry()
+            .lock()
+            .map_err(|_| "ウィンドウの状態を確認できません。")?;
+        let stored = registry.get(id).ok_or(
+            "ウィンドウが閉じられたか、一覧が古くなりました。もう一度一覧を確認してください。",
+        )?;
+        if stored.window.pid != identity.pid
+            || stored.window.bundle_id != identity.bundle_id
+            || stored.window.app_name != identity.name
+        {
+            return Err(
+                "対象ウィンドウのアプリが変わりました。もう一度一覧を確認してください。".into(),
+            );
+        }
+        let retained = unsafe { CFRetain(stored.element as CFTypeRef) };
+        Ok((
+            unsafe { CFType::wrap_under_create_rule(retained) },
+            stored.window.clone(),
+        ))
+    }
+
+    fn update_stored_window(
+        id: &str,
+        element: AXUIElementRef,
+        app: &DesktopApp,
+    ) -> Result<DesktopWindow, String> {
+        let updated = describe_window(element, id.to_string(), app)?;
+        let mut registry = window_registry()
+            .lock()
+            .map_err(|_| "ウィンドウの状態を更新できません。")?;
+        let stored = registry
+            .get_mut(id)
+            .ok_or("ウィンドウ一覧が更新されました。もう一度対象を選んでください。")?;
+        stored.window = updated.clone();
+        Ok(updated)
+    }
+
+    fn distance_to(bounds: DesktopBounds, screen: DesktopBounds) -> f64 {
+        let x = bounds.x + bounds.width / 2.0 - (screen.x + screen.width / 2.0);
+        let y = bounds.y + bounds.height / 2.0 - (screen.y + screen.height / 2.0);
+        x * x + y * y
+    }
+
+    fn intersection_area(bounds: DesktopBounds, screen: DesktopBounds) -> f64 {
+        let width = (bounds.x + bounds.width).min(screen.x + screen.width) - bounds.x.max(screen.x);
+        let height =
+            (bounds.y + bounds.height).min(screen.y + screen.height) - bounds.y.max(screen.y);
+        width.max(0.0) * height.max(0.0)
+    }
+
+    pub(super) fn fit_bounds(
+        mut bounds: DesktopBounds,
+        available: &[DesktopScreen],
+    ) -> DesktopBounds {
+        bounds.width = bounds.width.max(MIN_WINDOW_WIDTH);
+        bounds.height = bounds.height.max(MIN_WINDOW_HEIGHT);
+        let selected = available.iter().max_by(|left, right| {
+            let left_area = intersection_area(bounds, left.visible_bounds);
+            let right_area = intersection_area(bounds, right.visible_bounds);
+            left_area
+                .partial_cmp(&right_area)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    distance_to(bounds, right.visible_bounds)
+                        .partial_cmp(&distance_to(bounds, left.visible_bounds))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        let Some(screen) = selected.map(|screen| screen.visible_bounds) else {
+            return bounds;
+        };
+        bounds.width = bounds.width.min(screen.width);
+        bounds.height = bounds.height.min(screen.height);
+        bounds.x = bounds
+            .x
+            .clamp(screen.x, screen.x + screen.width - bounds.width);
+        bounds.y = bounds
+            .y
+            .clamp(screen.y, screen.y + screen.height - bounds.height);
+        bounds
+    }
+
+    pub(super) fn validated_bounds(
+        current: DesktopBounds,
+        update: DesktopBoundsUpdate,
+    ) -> Result<DesktopBounds, String> {
+        if update.x.is_none()
+            && update.y.is_none()
+            && update.width.is_none()
+            && update.height.is_none()
+        {
+            return Err("移動先またはサイズを指定してください。".into());
+        }
+        let bounds = DesktopBounds {
+            x: update.x.unwrap_or(current.x),
+            y: update.y.unwrap_or(current.y),
+            width: update.width.unwrap_or(current.width),
+            height: update.height.unwrap_or(current.height),
+        };
+        if ![bounds.x, bounds.y, bounds.width, bounds.height]
+            .into_iter()
+            .all(f64::is_finite)
+            || bounds.width <= 0.0
+            || bounds.height <= 0.0
+        {
+            return Err("位置と大きさは有限の正しい数値で指定してください。".into());
+        }
+        Ok(bounds)
+    }
+
+    pub fn list_windows(identity: DesktopApp) -> Result<DesktopWindowsState, String> {
+        let _app = target(&identity)?;
+        if !accessibility_granted() {
+            return Err(
+                "ウィンドウ一覧の取得にはmacOSのアクセシビリティでJARVISの許可が必要です。".into(),
+            );
+        }
+        let application = unsafe { AXUIElementCreateApplication(identity.pid) };
+        if application.is_null() {
+            return Err("対象アプリのウィンドウ情報を作成できませんでした。".into());
+        }
+        let application = unsafe { CFType::wrap_under_create_rule(application as CFTypeRef) };
+        unsafe {
+            AXUIElementSetMessagingTimeout(application.as_CFTypeRef() as AXUIElementRef, 1.0)
+        };
+        let values = ax_attribute(application.as_CFTypeRef() as AXUIElementRef, "AXWindows")?
+            .downcast::<CFArray>()
+            .ok_or("対象アプリからウィンドウ一覧を読み取れませんでした。")?;
+        let described = values
+            .get_all_values()
+            .into_iter()
+            .filter_map(|element| {
+                let element = element as AXUIElementRef;
+                let id = format!(
+                    "external-window-{}",
+                    NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed)
+                );
+                describe_window(element, id, &identity)
+                    .ok()
+                    .map(|window| (element, window))
+            })
+            .collect();
+        Ok(DesktopWindowsState {
+            windows: replace_window_registry(described)?,
+            screens: screens()?,
+        })
+    }
+
+    fn activate_window_now(id: &str, identity: &DesktopApp) -> Result<DesktopWindow, String> {
+        let (element, observed) = stored_window(id, identity)?;
+        let element_ref = element.as_CFTypeRef() as AXUIElementRef;
+        if observed.minimized {
+            set_ax_bool(element_ref, "AXMinimized", false)?;
+        }
+        set_ax_bool(element_ref, "AXMain", true)?;
+        set_ax_bool(element_ref, "AXFocused", true)?;
+        perform_ax_action(element_ref, "AXRaise")?;
+        activate(identity.clone())?;
+        update_stored_window(id, element_ref, identity)
+    }
+
+    pub fn get_window(id: String, identity: DesktopApp) -> Result<DesktopWindow, String> {
+        let (element, _) = stored_window(&id, &identity)?;
+        update_stored_window(&id, element.as_CFTypeRef() as AXUIElementRef, &identity)
+    }
+
+    pub fn activate_window(
+        id: String,
+        identity: DesktopApp,
+        generation: u64,
+    ) -> Result<DesktopWindow, String> {
+        EXECUTION.run(generation, || activate_window_now(&id, &identity))?
+    }
+
+    pub fn set_window_minimized(
+        id: String,
+        identity: DesktopApp,
+        minimized: bool,
+        generation: u64,
+    ) -> Result<DesktopWindow, String> {
+        EXECUTION.run(generation, || {
+            if !minimized {
+                return activate_window_now(&id, &identity);
+            }
+            let (element, _) = stored_window(&id, &identity)?;
+            let element_ref = element.as_CFTypeRef() as AXUIElementRef;
+            set_ax_bool(element_ref, "AXMinimized", true)?;
+            update_stored_window(&id, element_ref, &identity)
+        })?
+    }
+
+    pub fn set_window_bounds(
+        id: String,
+        identity: DesktopApp,
+        update: DesktopBoundsUpdate,
+        generation: u64,
+    ) -> Result<DesktopWindow, String> {
+        EXECUTION.run(generation, || {
+            let (element, _) = stored_window(&id, &identity)?;
+            let available = screens()?;
+            let element_ref = element.as_CFTypeRef() as AXUIElementRef;
+            // Preserve omitted fields from the live AX state, not the earlier list
+            // snapshot, because either the user or the app may have moved it since.
+            let current = ax_bounds(element_ref)?;
+            let resize_requested = update.width.is_some() || update.height.is_some();
+            let position_requested = update.x.is_some() || update.y.is_some();
+            let bounds = fit_bounds(validated_bounds(current, update)?, &available);
+            if resize_requested {
+                set_ax_size(
+                    element_ref,
+                    AXSize {
+                        width: bounds.width,
+                        height: bounds.height,
+                    },
+                )?;
+            }
+            // Apps may enforce a larger minimum size than requested. Read the
+            // applied size before positioning so the right/bottom edge stays visible.
+            let applied_size = ax_size(element_ref, "AXSize")?;
+            let positioned = fit_bounds(
+                DesktopBounds {
+                    x: bounds.x,
+                    y: bounds.y,
+                    width: applied_size.width,
+                    height: applied_size.height,
+                },
+                &available,
+            );
+            if position_requested || positioned.x != current.x || positioned.y != current.y {
+                set_ax_point(
+                    element_ref,
+                    AXPoint {
+                        x: positioned.x,
+                        y: positioned.y,
+                    },
+                )?;
+            }
+            update_stored_window(&id, element_ref, &identity)
+        })?
+    }
+
     pub fn list_apps() -> Result<DesktopState, String> {
         let workspace = NSWorkspace::sharedWorkspace();
         let mut apps: Vec<_> = workspace
@@ -220,7 +824,7 @@ mod platform {
             frontmost_pid: workspace
                 .frontmostApplication()
                 .map(|app| app.processIdentifier()),
-            accessibility_granted: CGPreflightPostEventAccess(),
+            accessibility_granted: accessibility_granted(),
             generation: EXECUTION.current()?,
         })
     }
@@ -317,6 +921,104 @@ pub async fn desktop_activate_app(app: AppHandle, target: DesktopApp) -> Result<
     {
         let _ = (app, target);
         Err("外部アプリ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_list_windows(
+    app: AppHandle,
+    target: DesktopApp,
+) -> Result<DesktopWindowsState, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, move || platform::list_windows(target)).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, target);
+        Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_activate_window(
+    app: AppHandle,
+    id: String,
+    target: DesktopApp,
+    generation: u64,
+) -> Result<DesktopWindow, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, move || {
+            platform::activate_window(id, target, generation)
+        })
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, target, generation);
+        Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_get_window(
+    app: AppHandle,
+    id: String,
+    target: DesktopApp,
+) -> Result<DesktopWindow, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, move || platform::get_window(id, target)).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, target);
+        Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_set_window_bounds(
+    app: AppHandle,
+    id: String,
+    target: DesktopApp,
+    bounds: DesktopBoundsUpdate,
+    generation: u64,
+) -> Result<DesktopWindow, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, move || {
+            platform::set_window_bounds(id, target, bounds, generation)
+        })
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, target, bounds, generation);
+        Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_set_window_minimized(
+    app: AppHandle,
+    id: String,
+    target: DesktopApp,
+    minimized: bool,
+    generation: u64,
+) -> Result<DesktopWindow, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, move || {
+            platform::set_window_minimized(id, target, minimized, generation)
+        })
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, target, minimized, generation);
+        Err("外部ウィンドウ操作はmacOS版で利用できます。".into())
     }
 }
 
@@ -419,5 +1121,80 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn validates_partial_bounds_and_rejects_empty_or_non_finite_updates() {
+        let current = DesktopBounds {
+            x: 40.0,
+            y: 50.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let moved = platform::validated_bounds(
+            current,
+            DesktopBoundsUpdate {
+                x: Some(100.0),
+                y: None,
+                width: None,
+                height: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(moved.x, 100.0);
+        assert_eq!(moved.height, 600.0);
+        assert!(platform::validated_bounds(
+            current,
+            DesktopBoundsUpdate {
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            }
+        )
+        .is_err());
+        assert!(platform::validated_bounds(
+            current,
+            DesktopBoundsUpdate {
+                x: Some(f64::NAN),
+                y: None,
+                width: None,
+                height: None,
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn keeps_external_window_inside_the_selected_screen_work_area() {
+        let screens = [DesktopScreen {
+            id: "screen-0".into(),
+            name: "Main".into(),
+            bounds: DesktopBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1440.0,
+                height: 900.0,
+            },
+            visible_bounds: DesktopBounds {
+                x: 0.0,
+                y: 25.0,
+                width: 1440.0,
+                height: 875.0,
+            },
+        }];
+        let fitted = platform::fit_bounds(
+            DesktopBounds {
+                x: 3000.0,
+                y: -200.0,
+                width: 2000.0,
+                height: 1000.0,
+            },
+            &screens,
+        );
+        assert_eq!(fitted.x, 0.0);
+        assert_eq!(fitted.y, 25.0);
+        assert_eq!(fitted.width, 1440.0);
+        assert_eq!(fitted.height, 875.0);
     }
 }

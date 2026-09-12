@@ -32,6 +32,7 @@ export interface RealtimeBackendConfig {
 }
 
 export interface RealtimeConnectOptions {
+	liveInstructions?: string
 	backend?: RealtimeBackendConfig
 	resolveChatroomId?: (signal: AbortSignal) => Promise<string>
 }
@@ -819,7 +820,9 @@ export class Realtime {
 							session: {
 								model: this.settings.model,
 								audio: { output: { voice: this.settings.voice } },
-								instructions: this.settings.instructions || undefined,
+								instructions:
+									(this.connectOptions.liveInstructions ?? this.settings.instructions) ||
+									undefined,
 								delegation: {
 									type: 'responses',
 									responses: {
@@ -1118,9 +1121,16 @@ export class Realtime {
 			return
 		}
 		const event = parsed as RealtimeEvent
+		const type = readString(event, 'type') ?? ''
+		// GPT Live streams input transcripts as deltas without a terminal input
+		// transcript event. The first assistant transcript delta is the reliable
+		// turn boundary, so finalize the accumulated user transcript before the
+		// assistant response event reaches consumers.
+		if (type === 'session.output_transcript.delta') {
+			this.finalizeLiveTranscript('user')
+		}
 		this.emit('event', event)
 
-		const type = readString(event, 'type') ?? ''
 		if (type === 'session.started') {
 			this.liveSessionStarted = true
 			this.maybeSetConnected()
@@ -1150,6 +1160,23 @@ export class Realtime {
 		}
 
 		this.handleTranscriptEvent(event, type)
+	}
+
+	private finalizeLiveTranscript(role: RealtimeTranscript['role']) {
+		const sequence = this.liveTranscriptSequences[role]
+		const id = `live:${role}:${sequence}`
+		const existing = this.transcriptBuffers.get(id)
+		if (!existing?.text) return
+		this.transcriptBuffers.delete(id)
+		this.liveTranscriptSequences[role] = sequence + 1
+		this.emit('transcript', {
+			id,
+			role: existing.role,
+			text: existing.text,
+			final: true,
+			itemId: existing.itemId,
+			responseId: existing.responseId,
+		})
 	}
 
 	private handleTranscriptEvent(event: RealtimeEvent, type: string) {
@@ -1368,6 +1395,7 @@ export interface TranscriptItem {
 	id: string
 	role: 'user' | 'assistant'
 	text: string
+	final: boolean
 }
 
 export interface RealtimeClientCallbacks {
@@ -1436,6 +1464,7 @@ export class RealtimeClient {
 						id: transcript.id,
 						role: transcript.role,
 						text: transcript.text,
+						final: transcript.final,
 					})
 				},
 				error: error => {
