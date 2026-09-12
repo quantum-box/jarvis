@@ -510,6 +510,11 @@ button svg {
 .browser-settings-heading p,
 .browser-privacy,
 .browser-result { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 0; }
+.browser-permission { display: flex; gap: 11px; margin-top: 15px; border: 1px solid #705b38; border-radius: 9px; background: #2a251a; color: #e9d3a5; padding: 13px 14px; }
+.browser-permission > svg { flex: 0 0 auto; margin-top: 1px; color: #e0af58; }
+.browser-permission strong { display: block; font-size: 12px; }
+.browser-permission p { margin: 5px 0 0; color: #c8bda6; font-size: 11px; line-height: 1.7; }
+.browser-permission-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
 .browser-settings .field-row { margin: 16px 0 12px; }
 .browser-opacity { display: grid; grid-template-columns: 1fr minmax(120px, 180px) 38px; align-items: center; gap: 12px; margin-top: 18px; color: #d0c9bb; font-size: 11px; }
 .browser-opacity > span { display: inline-flex; align-items: center; gap: 8px; }

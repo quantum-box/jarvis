@@ -28,6 +28,13 @@ const microphoneUsageDescription = run(
 if (!microphoneUsageDescription) {
   throw new Error('NSMicrophoneUsageDescription must not be empty');
 }
+const appDataUsageDescription = run(
+  'plutil',
+  ['-extract', 'NSAppDataUsageDescription', 'raw', '-o', '-', infoPlist],
+).trim();
+if (!appDataUsageDescription) {
+  throw new Error('NSAppDataUsageDescription must not be empty');
+}
 
 run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
 // `:-` asks codesign for the raw plist; `-` renders a human-readable tree on current macOS.

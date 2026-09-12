@@ -106,6 +106,7 @@ pub fn run() {
             browser::browser_back,
             browser::browser_forward,
             chrome_cookies::chrome_profiles,
+            chrome_cookies::open_chrome_data_access_settings,
             chrome_cookies::import_chrome_cookies,
             chrome_cookies::clear_browser_site_data
         ])

@@ -35,6 +35,7 @@ fs.writeFileSync(output + '/Info.plist', 'fixture plist');
 const key = process.argv[process.argv.indexOf('-extract') + 1].replaceAll('\\\\.', '.');
 if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
 else if (key === 'NSMicrophoneUsageDescription') process.stdout.write('JARVIS needs microphone access.\\n');
+else if (key === 'NSAppDataUsageDescription') process.stdout.write('JARVIS reads a selected Chrome profile.\\n');
 else if (key === 'com.apple.security.device.audio-input') process.stdout.write('true\\n');
 else process.exit(1);
 `, { mode: 0o755 });
@@ -109,12 +110,26 @@ else process.exit(1);
   expect(result.stderr).toContain('NSMicrophoneUsageDescription');
   expect(() => readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/0.2.0/JARVIS.app.tar.gz'))).toThrow();
 }, 15_000);
+it('does not copy an archive when the app data usage description is missing', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'bin/plutil'), `#!/usr/bin/env node
+const key = process.argv[process.argv.indexOf('-extract') + 1].replaceAll('\\\\.', '.');
+if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
+else if (key === 'NSMicrophoneUsageDescription') process.stdout.write('JARVIS needs microphone access.\\n');
+else process.exit(1);
+`, { mode: 0o755 });
+  const result = f.run();
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('NSAppDataUsageDescription');
+  expect(() => readFileSync(join(f.root, 'artifacts/updates/darwin-aarch64/0.2.0/JARVIS.app.tar.gz'))).toThrow();
+}, 15_000);
 it('does not copy an archive when the signed app lacks the microphone entitlement', () => {
   const f = fixture();
   writeFileSync(join(f.root, 'bin/plutil'), `#!/usr/bin/env node
 const key = process.argv[process.argv.indexOf('-extract') + 1].replaceAll('\\\\.', '.');
 if (key === 'CFBundleIdentifier') process.stdout.write('com.quantumbox.jarvis\\n');
 else if (key === 'NSMicrophoneUsageDescription') process.stdout.write('JARVIS needs microphone access.\\n');
+else if (key === 'NSAppDataUsageDescription') process.stdout.write('JARVIS reads a selected Chrome profile.\\n');
 else process.exit(1);
 `, { mode: 0o755 });
   const result = f.run();

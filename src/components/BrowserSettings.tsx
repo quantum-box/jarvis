@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Blend, Cookie, Globe2, Trash2 } from 'lucide-react'
+import { Blend, Cookie, ExternalLink, Globe2, RefreshCw, ShieldAlert, Trash2 } from 'lucide-react'
 import { browserRequest, isManagedBrowserAvailable, loadBrowserOpacity, saveBrowserOpacity } from '../lib/browser'
 
-type ChromeProfile = { id: string; name: string }
+type ChromeProfile = { id: string; name: string; account?: string; lastUsed: boolean }
+type ChromeProfileStatus = 'ready' | 'permissionDenied' | 'chromeNotFound' | 'noProfiles' | 'error'
+type ChromeProfileReport = { profiles: ChromeProfile[]; status: Exclude<ChromeProfileStatus, 'error'> }
 type ImportResult = {
 	domain: string
 	imported: number
@@ -19,18 +21,36 @@ export function BrowserSettings() {
 	const [profile, setProfile] = useState('')
 	const [domain, setDomain] = useState('')
 	const [busy, setBusy] = useState(false)
+	const [profilesBusy, setProfilesBusy] = useState(false)
+	const [profileStatus, setProfileStatus] = useState<ChromeProfileStatus | 'loading'>('loading')
 	const [message, setMessage] = useState('')
 	const [opacity, setOpacity] = useState(loadBrowserOpacity)
 
+	const refreshProfiles = useCallback(async () => {
+		setProfilesBusy(true)
+		try {
+			const result = await invoke<ChromeProfileReport>('chrome_profiles')
+			setProfiles(result.profiles)
+			setProfile(current => result.profiles.some(item => item.id === current) ? current : result.profiles[0]?.id || '')
+			setProfileStatus(result.status)
+			if (result.status === 'ready') setMessage('')
+		} catch (error) {
+			setProfiles([])
+			setProfile('')
+			setProfileStatus('error')
+			setMessage(String(error))
+		} finally {
+			setProfilesBusy(false)
+		}
+	}, [])
+
 	useEffect(() => {
 		if (!available) return
-		void invoke<ChromeProfile[]>('chrome_profiles')
-			.then(items => {
-				setProfiles(items)
-				setProfile(current => current || items[0]?.id || '')
-			})
-			.catch(error => setMessage(String(error)))
-	}, [available])
+		void refreshProfiles()
+		const refreshAfterPermissionChange = () => void refreshProfiles()
+		window.addEventListener('focus', refreshAfterPermissionChange)
+		return () => window.removeEventListener('focus', refreshAfterPermissionChange)
+	}, [available, refreshProfiles])
 
 	if (!available) return null
 
@@ -53,6 +73,19 @@ export function BrowserSettings() {
 			setMessage(String(error))
 		} finally {
 			setBusy(false)
+		}
+	}
+
+	async function openDataAccessSettings() {
+		setProfilesBusy(true)
+		setMessage('')
+		try {
+			await invoke('open_chrome_data_access_settings')
+			setMessage('フルディスクアクセスでJARVISを追加またはオンにしてください。JARVISへ戻ると自動で再確認します。反映されない場合はJARVISを再起動してください。')
+		} catch (error) {
+			setMessage(String(error))
+		} finally {
+			setProfilesBusy(false)
 		}
 	}
 
@@ -95,6 +128,26 @@ export function BrowserSettings() {
 			.catch(error => setMessage(String(error)))
 	}
 
+	const profileIssues: Partial<Record<ChromeProfileStatus, { title: string; body: string }>> = {
+		permissionDenied: {
+			title: 'Chromeへのアクセス許可が必要です',
+			body: 'macOSのアクセス確認で拒否した場合や確認が再表示されない場合は、「フルディスクアクセス」でJARVISを追加またはオンにしてください。',
+		},
+		chromeNotFound: {
+			title: 'Google Chromeが見つかりません',
+			body: 'Chromeをインストールして一度起動し、ログインに使うプロファイルを作成してから再確認してください。',
+		},
+		noProfiles: {
+			title: 'CookieのあるChromeプロファイルが見つかりません',
+			body: 'Chromeで対象サイトを開いたあと、再確認してください。権限変更直後の場合はJARVISの再起動が必要なことがあります。',
+		},
+		error: {
+			title: 'Chromeプロファイルを確認できませんでした',
+			body: 'ChromeとJARVISを起動し直してから再確認してください。',
+		},
+	}
+	const profileIssue = profileStatus === 'loading' ? undefined : profileIssues[profileStatus]
+
 	return (
 		<section className="browser-settings" aria-labelledby="browser-settings-title">
 			<div className="browser-settings-heading">
@@ -104,6 +157,25 @@ export function BrowserSettings() {
 					<p>Chromeの選択したサイトのCookieだけを、このMac上のJARVISへコピーします。</p>
 				</div>
 			</div>
+			{profileIssue && (
+				<div className="browser-permission" role="alert">
+					<ShieldAlert size={19} />
+					<div>
+						<strong>{profileIssue.title}</strong>
+						<p>{profileIssue.body}</p>
+						<div className="browser-permission-actions">
+							{profileStatus === 'permissionDenied' && (
+								<button className="secondary" disabled={profilesBusy} onClick={() => void openDataAccessSettings()}>
+									<ExternalLink size={14} /> フルディスクアクセス設定を開く
+								</button>
+							)}
+							<button className="secondary" disabled={profilesBusy} onClick={() => void refreshProfiles()}>
+								<RefreshCw size={14} /> 再確認
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
 			<label className="browser-opacity">
 				<span><Blend size={15} /> ウィンドウの透明度</span>
 				<input aria-label="ウィンドウの透明度" type="range" min="35" max="100" step="5" value={Math.round(opacity * 100)} onChange={event => changeOpacity(Number(event.currentTarget.value))} />
@@ -112,8 +184,13 @@ export function BrowserSettings() {
 			<div className="field-row">
 				<label>
 					Chrome profile
-					<select value={profile} onChange={event => setProfile(event.target.value)} disabled={busy || !profiles.length}>
-						{profiles.map(item => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}
+					<select value={profile} onChange={event => setProfile(event.target.value)} disabled={busy || profilesBusy || !profiles.length}>
+						{!profiles.length && <option value="">利用可能なプロファイルなし</option>}
+						{profiles.map(item => (
+							<option key={item.id} value={item.id}>
+								{item.name}{item.account ? ` — ${item.account}` : ''}{item.lastUsed ? '［前回使用］' : ''} ({item.id})
+							</option>
+						))}
 					</select>
 				</label>
 				<label>
@@ -122,14 +199,14 @@ export function BrowserSettings() {
 				</label>
 			</div>
 			<div className="browser-settings-actions">
-				<button className="secondary" disabled={busy || !profile || !domain.trim()} onClick={() => void importCookies()}>
+				<button className="secondary" disabled={busy || profilesBusy || !profile || !domain.trim()} onClick={() => void importCookies()}>
 					<Cookie size={16} /> Cookieを取り込む
 				</button>
 				<button className="danger-secondary" disabled={busy || !domain.trim()} onClick={() => void clearSiteData()}>
 					<Trash2 size={16} /> サイトデータを削除
 				</button>
 			</div>
-			<p className="browser-privacy">Cookie値と復号鍵は画面、AI、Tachyon、ログへ送信しません。Chromeとの自動同期は行いません。</p>
+			<p className="browser-privacy">Cookie取込時にmacOSから「Chrome Safe Storage」へのアクセス確認が表示されたら許可してください。Cookie値と復号鍵は画面、AI、Tachyon、ログへ送信しません。Chromeとの自動同期は行いません。</p>
 			{message && <p className="browser-result" role="status">{message}</p>}
 		</section>
 	)

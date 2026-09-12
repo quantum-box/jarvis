@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X, ShieldCheck } from "lucide-react";
-import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL, normalizeRealtimeModel } from "../lib/realtime";
+import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL, LIVE_BACKEND_MODELS } from "../lib/realtime";
 import { BrowserSettings } from "./BrowserSettings";
 import { DesktopSettings } from "./DesktopSettings";
 export interface ConnectionSettings {
@@ -14,8 +14,17 @@ export interface ConnectionSettings {
   voice: string;
   instructions: string;
 }
+const DEFAULT_TACHYON_API_URL = "https://api.n1.tachy.one";
+const PERSISTED_SETTING_KEYS = [
+  "tenantId",
+  "cognitoRegion",
+  "cognitoClientId",
+  "chatroomId",
+  "backendModel",
+  "instructions",
+] as const satisfies readonly (keyof ConnectionSettings)[];
 export const defaults: ConnectionSettings = {
-  baseUrl: "https://api.n1.tachy.one",
+  baseUrl: DEFAULT_TACHYON_API_URL,
   tenantId: "",
   cognitoRegion: import.meta.env.VITE_COGNITO_REGION || "ap-northeast-1",
   cognitoClientId: import.meta.env.VITE_COGNITO_CLIENT_ID || "3h68pjtkucobvs9r3ojja7q7m",
@@ -32,15 +41,13 @@ export function loadSettings(): ConnectionSettings {
     const settings = {
       ...defaults,
       ...Object.fromEntries(
-        Object.keys(defaults)
+        PERSISTED_SETTING_KEYS
           .filter((k) => typeof saved[k] === "string")
           .map((k) => [k, saved[k]]),
       ),
     };
-    // Upgrade the previous JARVIS defaults once; explicit custom choices survive.
-    if (saved.realtimeModelVersion !== 2 &&
-        ["", "gpt-realtime", "gpt-realtime-2", "gpt-realtime-2.1"].includes(settings.model)) {
-      settings.model = DEFAULT_REALTIME_MODEL;
+    if (!LIVE_BACKEND_MODELS.some(model => model === settings.backendModel)) {
+      settings.backendModel = DEFAULT_LIVE_BACKEND_MODEL;
     }
     return settings;
   } catch {
@@ -48,8 +55,11 @@ export function loadSettings(): ConnectionSettings {
   }
 }
 export function saveSettings(value: ConnectionSettings) {
-  const safe = Object.fromEntries(Object.keys(defaults).map(key => [key, value[key as keyof ConnectionSettings]]));
-  localStorage.setItem("jarvis.settings", JSON.stringify({ ...safe, realtimeModelVersion: 2 }));
+  const safe = Object.fromEntries(PERSISTED_SETTING_KEYS.map(key => [key, value[key]]));
+  if (!LIVE_BACKEND_MODELS.some(model => model === safe.backendModel)) {
+    safe.backendModel = DEFAULT_LIVE_BACKEND_MODEL;
+  }
+  localStorage.setItem("jarvis.settings", JSON.stringify(safe));
 }
 export function Settings({
   value,
@@ -68,7 +78,6 @@ export function Settings({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [saveError, setSaveError] = useState("");
-  const liveModelSelected = normalizeRealtimeModel(value.model) === DEFAULT_REALTIME_MODEL;
   useEffect(() => {
     dialog.current?.showModal();
   }, []);
@@ -87,7 +96,7 @@ export function Settings({
         onChange={(e) => onChange({ ...value, [key]: e.target.value })}
         autoComplete="off"
         spellCheck={false}
-        disabled={signedIn && ['baseUrl', 'cognitoRegion', 'cognitoClientId'].includes(key)}
+        disabled={signedIn && ['cognitoRegion', 'cognitoClientId'].includes(key)}
       />
     </label>
   );
@@ -114,41 +123,22 @@ export function Settings({
         </button>
       </div>
       <p className="muted">
-        Tachyonの接続先と、利用するテナントを設定してください。
+        利用するテナントと会話設定を選んでください。
       </p>
       {appUpdate}
       <div className="settings-fields">
-        {field("baseUrl", "Tachyon API URL", "https://api.n1.tachy.one")}
         {tenants.length ? <label>利用するテナント<select value={value.tenantId} onChange={e => onChange({...value, tenantId: e.target.value, chatroomId: ''})}>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label> : field("tenantId", "Tenant ID", "ログイン後に取得します")}
         {!signedIn && <details><summary>ログイン接続設定</summary><div className="settings-fields">{field('cognitoRegion', 'Cognito region')}{field('cognitoClientId', 'Cognito public client ID', 'Tachyonと共通の公開クライアントID')}</div></details>}
         {field("chatroomId", "Chatroom ID", "空欄ならこの起動中の初回に自動作成")}
-        <div className="field-row">
-          {field("model", "Model")}
-          {!liveModelSelected && <label>
-            Voice
-            <select
-              value={value.voice}
-              onChange={(e) => onChange({ ...value, voice: e.target.value })}
-            >
-              {[
-                "marin",
-                "cedar",
-                "ash",
-                "verse",
-                "alloy",
-                "sage",
-                "coral",
-                "echo",
-                "shimmer",
-                "ballad",
-              ].map((v) => (
-                <option key={v}>{v}</option>
-              ))}
-            </select>
-          </label>}
-        </div>
-        {liveModelSelected &&
-          field("backendModel", "Responses backend model", DEFAULT_LIVE_BACKEND_MODEL)}
+        <label>
+          Responses backend model
+          <select
+            value={value.backendModel}
+            onChange={(e) => onChange({ ...value, backendModel: e.target.value })}
+          >
+            {LIVE_BACKEND_MODELS.map(model => <option key={model} value={model}>{model}</option>)}
+          </select>
+        </label>
         <label>
           パーソナリティ
           <textarea
@@ -165,7 +155,7 @@ export function Settings({
       <div className="privacy-note">
         <ShieldCheck size={18} />
         <span>
-          接続先の変更にはログアウトが必要です。
+          ログイン接続設定の変更にはログアウトが必要です。
         </span>
       </div>
       <button
