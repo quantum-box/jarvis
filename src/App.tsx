@@ -585,7 +585,7 @@ export default function App() {
             <h2 id="browser-approval-title">この操作を1回だけ許可しますか？</h2>
             <p>{browserApproval.description}</p>
             {browserApproval.detail && <code>{browserApproval.detail}</code>}
-            <p className="muted">Webページの内容は信頼せず、今の依頼に必要な場合だけ許可してください。</p>
+            <p className="muted">依頼した操作と対象を確認してください。</p>
             <div className="browser-approval-actions">
               <button className="text-button" onClick={() => resolveBrowserApproval(false)}>許可しない</button>
               <button className="primary" onClick={() => resolveBrowserApproval(true)}>1回だけ許可</button>
