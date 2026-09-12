@@ -3,6 +3,31 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
 import { defaults, loadSettings, saveSettings, Settings } from "./Settings";
 afterEach(() => vi.unstubAllGlobals());
+it("shows the saved voice and reconnect guidance", () => {
+  const html = renderToStaticMarkup(createElement(Settings, {
+    value: { ...defaults, voice: "cedar" },
+    onChange: () => undefined,
+    onClose: () => undefined,
+  }));
+  expect(html).toContain("JARVISの声");
+  expect(html).toContain('<option value="cedar" selected="">cedar</option>');
+  expect(html).toContain("声の変更は次の会話開始時に反映されます。");
+});
+it("restores the selected voice after saving", () => {
+  let stored = "{}";
+  vi.stubGlobal("localStorage", {
+    getItem: () => stored,
+    setItem: (_key: string, value: string) => { stored = value; },
+  });
+  saveSettings({ ...defaults, voice: "cedar" });
+  expect(loadSettings()).toMatchObject({ model: "gpt-live-1", voice: "cedar" });
+});
+it("preserves a voice saved before the connection settings were simplified", () => {
+  vi.stubGlobal("localStorage", {
+    getItem: () => JSON.stringify({ model: "gpt-realtime-2.1", voice: "cedar", realtimeModelVersion: 2 }),
+  });
+  expect(loadSettings()).toMatchObject({ model: "gpt-live-1", voice: "cedar" });
+});
 it("always uses the fixed Tachyon API URL and GPT Live model", () => {
   vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ baseUrl: "https://example.test", model: "gpt-realtime-2", tenantId: "tn_test" }) });
   expect(loadSettings()).toMatchObject({ baseUrl: defaults.baseUrl, model: "gpt-live-1", tenantId: "tn_test" });
