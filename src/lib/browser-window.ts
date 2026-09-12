@@ -16,6 +16,20 @@ export type BrowserWindowInteraction = {
 
 export type BrowserViewport = { width: number; height: number }
 
+export const updateBrowserBounds = (
+	current: BrowserBounds,
+	changes: Record<string, unknown>,
+	viewport: BrowserViewport,
+): BrowserBounds => {
+	const entries = Object.entries(changes)
+	if (!entries.length || entries.some(([key, value]) =>
+		!['x', 'y', 'width', 'height'].includes(key) ||
+		typeof value !== 'number' || !Number.isFinite(value) ||
+		((key === 'width' || key === 'height') && value <= 0),
+	)) throw new Error('位置・サイズには有効な数値を指定してください。幅と高さは0より大きい値が必要です。')
+	return fitBrowserBounds({ ...current, ...changes }, viewport)
+}
+
 export const fitBrowserBounds = (
 	bounds: BrowserBounds,
 	viewport: BrowserViewport,
