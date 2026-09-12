@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSAppDataUsageDescription</key>
+	<string>Chromeで選択したサイトのログイン状態をJARVISのアプリ内ブラウザへコピーするため、選択したChromeプロファイルを読み取ります。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>JARVIS needs microphone access for voice conversations with your AI assistant.</string>
 </dict>

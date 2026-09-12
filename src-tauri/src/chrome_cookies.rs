@@ -6,6 +6,25 @@ use tauri::AppHandle;
 pub struct ChromeProfile {
     id: String,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    last_used: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChromeProfileReport {
+    profiles: Vec<ChromeProfile>,
+    status: ChromeProfileStatus,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ChromeProfileStatus {
+    Ready,
+    PermissionDenied,
+    ChromeNotFound,
+    NoProfiles,
 }
 
 #[derive(Serialize)]
@@ -33,18 +52,23 @@ mod platform {
     use super::*;
     use aes::Aes128;
     use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
     use pbkdf2::pbkdf2_hmac;
     use rusqlite::{Connection, OpenFlags};
     use sha1::Sha1;
     use sha2::{Digest, Sha256};
-    use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
+    use std::{collections::HashMap, fs, io, path::PathBuf, time::SystemTime};
     use tauri::{Manager, Webview};
+    use tokio::sync::oneshot;
     use zeroize::Zeroize;
 
     type Aes128CbcDec = cbc::Decryptor<Aes128>;
     const CHROME_SERVICE: &str = "Chrome Safe Storage";
     const CHROME_ACCOUNT: &str = "Chrome";
     const CHROME_EPOCH_OFFSET_SECONDS: i64 = 11_644_473_600;
+    const CHROME_ACCESS_DENIED: &str = "JARVISにChromeデータへのアクセス権限がありません。macOSの「プライバシーとセキュリティ」→「フルディスクアクセス」でJARVISをオンにしてください。";
 
     fn chrome_root(app: &AppHandle) -> Result<PathBuf, String> {
         Ok(app
@@ -54,56 +78,152 @@ mod platform {
             .join("Library/Application Support/Google/Chrome"))
     }
 
-    fn profile_names(app: &AppHandle) -> HashMap<String, String> {
+    #[derive(Clone)]
+    pub(super) struct ChromeProfileMetadata {
+        pub(super) name: String,
+        pub(super) account: Option<String>,
+    }
+
+    pub(super) fn parse_profile_metadata(
+        value: &serde_json::Value,
+    ) -> (HashMap<String, ChromeProfileMetadata>, Option<String>) {
+        let last_used = value
+            .pointer("/profile/last_used")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let profiles = value
+            .pointer("/profile/info_cache")
+            .and_then(|value| value.as_object())
+            .map(|profiles| {
+                profiles
+                    .iter()
+                    .filter_map(|(id, value)| {
+                        let name = value.get("name")?.as_str()?.trim();
+                        if name.is_empty() {
+                            return None;
+                        }
+                        let account = value
+                            .get("user_name")
+                            .and_then(|account| account.as_str())
+                            .map(str::trim)
+                            .filter(|account| !account.is_empty())
+                            .map(str::to_owned);
+                        Some((
+                            id.clone(),
+                            ChromeProfileMetadata {
+                                name: name.to_owned(),
+                                account,
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (profiles, last_used)
+    }
+
+    fn profile_metadata(
+        app: &AppHandle,
+    ) -> (HashMap<String, ChromeProfileMetadata>, Option<String>) {
         let path = chrome_root(app).ok().map(|path| path.join("Local State"));
         let value = path
             .and_then(|path| fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         value
-            .and_then(|value| value.pointer("/profile/info_cache").cloned())
-            .and_then(|value| value.as_object().cloned())
-            .map(|profiles| {
-                profiles
-                    .into_iter()
-                    .filter_map(|(id, value)| {
-                        value
-                            .get("name")
-                            .and_then(|name| name.as_str())
-                            .map(|name| (id, name.to_string()))
-                    })
-                    .collect()
-            })
+            .as_ref()
+            .map(parse_profile_metadata)
             .unwrap_or_default()
     }
 
-    fn cookie_path(root: &std::path::Path, profile: &str) -> Option<PathBuf> {
-        [
+    fn cookie_path(root: &std::path::Path, profile: &str) -> io::Result<Option<PathBuf>> {
+        for path in [
             root.join(profile).join("Network/Cookies"),
             root.join(profile).join("Cookies"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
+        ] {
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => match fs::File::open(&path) {
+                    Ok(_) => return Ok(Some(path)),
+                    Err(error) => return Err(error),
+                },
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
     }
 
-    pub fn profiles(app: &AppHandle) -> Result<Vec<ChromeProfile>, String> {
+    pub fn profiles(app: &AppHandle) -> Result<ChromeProfileReport, String> {
         let root = chrome_root(app)?;
-        let names = profile_names(app);
+        let (metadata, last_used) = profile_metadata(app);
         let mut profiles = Vec::new();
-        let entries = fs::read_dir(&root)
-            .map_err(|_| "Chromeプロファイルが見つかりませんでした。".to_string())?;
-        for entry in entries.flatten() {
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(ChromeProfileReport {
+                    profiles,
+                    status: ChromeProfileStatus::PermissionDenied,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ChromeProfileReport {
+                    profiles,
+                    status: ChromeProfileStatus::ChromeNotFound,
+                });
+            }
+            Err(_) => return Err("Chromeプロファイルを確認できませんでした。".to_string()),
+        };
+        let mut permission_denied = false;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    permission_denied = true;
+                    continue;
+                }
+                Err(_) => continue,
+            };
             let id = entry.file_name().to_string_lossy().to_string();
             if id != "Default" && !id.starts_with("Profile ") {
                 continue;
             }
-            if cookie_path(&root, &id).is_none() {
-                continue;
+            match cookie_path(&root, &id) {
+                Ok(Some(_)) => {}
+                Ok(None) => continue,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    permission_denied = true;
+                    continue;
+                }
+                Err(_) => continue,
             }
-            let name = names.get(&id).cloned().unwrap_or_else(|| id.clone());
-            profiles.push(ChromeProfile { id, name });
+            let profile_metadata = metadata.get(&id);
+            let name = profile_metadata
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| id.clone());
+            let account = profile_metadata.and_then(|profile| profile.account.clone());
+            let is_last_used = last_used.as_deref() == Some(id.as_str());
+            profiles.push(ChromeProfile {
+                id,
+                name,
+                account,
+                last_used: is_last_used,
+            });
         }
-        profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        Ok(profiles)
+        profiles.sort_by(|left, right| {
+            right
+                .last_used
+                .cmp(&left.last_used)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let status = if !profiles.is_empty() {
+            ChromeProfileStatus::Ready
+        } else if permission_denied {
+            ChromeProfileStatus::PermissionDenied
+        } else {
+            ChromeProfileStatus::NoProfiles
+        };
+        Ok(ChromeProfileReport { profiles, status })
     }
 
     pub(crate) fn normalize_domain(value: &str) -> Result<String, String> {
@@ -132,13 +252,25 @@ mod platform {
     }
 
     fn validate_profile(app: &AppHandle, profile: &str) -> Result<PathBuf, String> {
-        if !profiles(app)?
+        let report = profiles(app)?;
+        if matches!(report.status, ChromeProfileStatus::PermissionDenied) {
+            return Err(CHROME_ACCESS_DENIED.into());
+        }
+        if !report
+            .profiles
             .iter()
             .any(|candidate| candidate.id == profile)
         {
             return Err("Chromeプロファイルを確認できませんでした。".into());
         }
         cookie_path(&chrome_root(app)?, profile)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    CHROME_ACCESS_DENIED.to_string()
+                } else {
+                    "ChromeのCookieデータを確認できませんでした。".to_string()
+                }
+            })?
             .ok_or_else(|| "ChromeのCookieデータが見つかりませんでした。".into())
     }
 
@@ -194,16 +326,51 @@ mod platform {
                 && psl::domain_str(host) == psl::domain_str(domain))
     }
 
+    pub(super) fn keychain_error_message(code: i32) -> String {
+        match code {
+            -128 | -25293 => "Chrome Safe Storageへのアクセスが許可されませんでした。Cookie取込をもう一度実行し、macOSの確認で「許可」を選んでください。".into(),
+            -25300 => "キーチェーンにChrome Safe Storageが見つかりません。Chromeを一度起動してから、もう一度お試しください。".into(),
+            -25308 => "キーチェーンを操作できませんでした。Macのロックを解除し、JARVISを前面にしてからもう一度お試しください。".into(),
+            _ => "Chrome Safe Storageをキーチェーンから読み取れませんでした。Cookie取込を再実行し、macOSの確認を許可してください。".into(),
+        }
+    }
+
     fn chrome_key() -> Result<[u8; 16], String> {
         let mut password =
             security_framework::passwords::get_generic_password(CHROME_SERVICE, CHROME_ACCOUNT)
-                .map_err(|_| {
-                    "Chrome Safe Storageをキーチェーンから読み取れませんでした。".to_string()
-                })?;
+                .map_err(|error| keychain_error_message(error.code()))?;
         let mut key = [0u8; 16];
         pbkdf2_hmac::<Sha1>(&password, b"saltysalt", 1003, &mut key);
         password.zeroize();
         Ok(key)
+    }
+
+    fn open_full_disk_access_settings() -> Result<(), String> {
+        // Full Disk Access cannot be granted by code. This entry point is called only from
+        // the user's settings button after JARVIS detects that Chrome is unreadable.
+        let _ = MainThreadMarker::new().ok_or("設定を開けませんでした。")?;
+        let url = NSURL::URLWithString(&NSString::from_str(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+        ))
+        .ok_or("フルディスクアクセス設定を開けませんでした。")?;
+        if !NSWorkspace::sharedWorkspace().openURL(&url) {
+            return Err(
+                "システム設定の「プライバシーとセキュリティ」→「フルディスクアクセス」を開いてください。"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn open_data_access_settings(app: AppHandle) -> Result<(), String> {
+        let (send, receive) = oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = send.send(open_full_disk_access_settings());
+        })
+        .map_err(|error| error.to_string())?;
+        receive
+            .await
+            .map_err(|_| "設定を開けませんでした。".to_string())?
     }
 
     pub(crate) fn decrypt_value(
@@ -451,13 +618,27 @@ mod platform {
 }
 
 #[tauri::command]
-pub fn chrome_profiles(app: AppHandle) -> Result<Vec<ChromeProfile>, String> {
+pub fn chrome_profiles(app: AppHandle) -> Result<ChromeProfileReport, String> {
     #[cfg(target_os = "macos")]
     return platform::profiles(&app);
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        Ok(Vec::new())
+        Ok(ChromeProfileReport {
+            profiles: Vec::new(),
+            status: ChromeProfileStatus::ChromeNotFound,
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn open_chrome_data_access_settings(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return platform::open_data_access_settings(app).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Chromeデータの権限設定はmacOS版で利用できます。".into())
     }
 }
 
@@ -493,8 +674,8 @@ pub async fn clear_browser_site_data(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::platform::{
-        cookie_host_matches_target, database_version, decrypt_value, matching_hosts_for_test,
-        normalize_domain,
+        cookie_host_matches_target, database_version, decrypt_value, keychain_error_message,
+        matching_hosts_for_test, normalize_domain, parse_profile_metadata,
     };
     use aes::Aes128;
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
@@ -502,6 +683,35 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     type Aes128CbcEnc = cbc::Encryptor<Aes128>;
+
+    #[test]
+    fn gives_actionable_keychain_permission_errors() {
+        assert!(keychain_error_message(-128).contains("もう一度実行"));
+        assert!(keychain_error_message(-25293).contains("許可"));
+        assert!(keychain_error_message(-25300).contains("Chromeを一度起動"));
+        assert!(keychain_error_message(-25308).contains("ロックを解除"));
+    }
+
+    #[test]
+    fn reads_profile_account_and_last_used_metadata() {
+        let value = serde_json::json!({
+            "profile": {
+                "info_cache": {
+                    "Default": { "name": "仕事", "user_name": "person@example.com" },
+                    "Profile 1": { "name": "個人", "user_name": "" }
+                },
+                "last_used": "Profile 1"
+            }
+        });
+        let (profiles, last_used) = parse_profile_metadata(&value);
+        assert_eq!(profiles["Default"].name, "仕事");
+        assert_eq!(
+            profiles["Default"].account.as_deref(),
+            Some("person@example.com")
+        );
+        assert_eq!(profiles["Profile 1"].account, None);
+        assert_eq!(last_used.as_deref(), Some("Profile 1"));
+    }
 
     #[test]
     fn normalizes_plain_host_and_url() {
