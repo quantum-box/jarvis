@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X, ShieldCheck } from "lucide-react";
 import { DEFAULT_LIVE_BACKEND_MODEL, DEFAULT_REALTIME_MODEL, normalizeRealtimeModel } from "../lib/realtime";
 import { BrowserSettings } from "./BrowserSettings";
+import { DesktopSettings } from "./DesktopSettings";
 export interface ConnectionSettings {
   baseUrl: string;
   tenantId: string;
@@ -160,6 +161,7 @@ export function Settings({
         </label>
       </div>
       <BrowserSettings />
+      <DesktopSettings />
       <div className="privacy-note">
         <ShieldCheck size={18} />
         <span>

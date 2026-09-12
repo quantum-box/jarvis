@@ -45,6 +45,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["sync", "time"] }
 zeroize = "1"
 objc2-app-kit = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation", "libc"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSError", "NSString"] }
 objc2-web-kit = { version = "0.3.2", features = ["block2", "WKContentWorld", "WKFrameInfo", "WKWebView"] }

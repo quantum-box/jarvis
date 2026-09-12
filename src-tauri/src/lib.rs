@@ -1,6 +1,7 @@
 mod auth_store;
 mod browser;
 mod chrome_cookies;
+mod desktop;
 
 #[cfg(desktop)]
 const CHECK_FOR_UPDATES_MENU_ID: &str = "check-for-updates";
@@ -77,6 +78,11 @@ pub fn run() {
             auth_store::load_auth_session,
             auth_store::save_auth_session,
             auth_store::clear_auth_session,
+            desktop::desktop_list_apps,
+            desktop::desktop_activate_app,
+            desktop::desktop_send_shortcut,
+            desktop::desktop_cancel_pending,
+            desktop::desktop_open_accessibility_settings,
             browser::browser_open,
             browser::browser_create,
             browser::browser_navigate,

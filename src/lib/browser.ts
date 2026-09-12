@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import type { RealtimeClient, RealtimeConnectOptions, RealtimeEvent } from './realtime'
 import { BROWSER_WINDOW_MIN_HEIGHT, BROWSER_WINDOW_MIN_WIDTH, fitBrowserBounds, updateBrowserBounds, type BrowserViewport } from './browser-window'
+import { DESKTOP_INSTRUCTIONS, DESKTOP_TOOLS, DesktopToolController } from './desktop'
 
 export interface BrowserStatus {
 	id: string
@@ -199,8 +200,8 @@ export function browserSessionConfig(instructions: string): RealtimeEvent {
 		type: 'session.update',
 		session: {
 			type: 'realtime',
-			instructions: `${instructions}${BROWSER_INSTRUCTIONS}`,
-			tools: BROWSER_TOOLS,
+			instructions: `${instructions}${BROWSER_INSTRUCTIONS}${DESKTOP_INSTRUCTIONS}`,
+			tools: [...BROWSER_TOOLS, ...DESKTOP_TOOLS],
 			tool_choice: 'auto',
 		},
 	}
@@ -209,8 +210,8 @@ export function browserSessionConfig(instructions: string): RealtimeEvent {
 export function browserBackendConfig(instructions: string): RealtimeConnectOptions {
 	return {
 		backend: {
-			instructions: `${instructions}${BROWSER_INSTRUCTIONS}`,
-			tools: BROWSER_TOOLS,
+			instructions: `${instructions}${BROWSER_INSTRUCTIONS}${DESKTOP_INSTRUCTIONS}`,
+			tools: [...BROWSER_TOOLS, ...DESKTOP_TOOLS],
 			toolChoice: 'auto',
 			parallelToolCalls: false,
 		},
@@ -331,6 +332,7 @@ export class BrowserToolRunner {
 		private approve: BrowserApprovalHandler = async () => false,
 		private report: (message: string) => void = () => {},
 		private viewport: () => BrowserViewport = () => ({ width: window.innerWidth, height: window.innerHeight }),
+		private desktop: DesktopToolController = new DesktopToolController(undefined, approve),
 	) {}
 
 	setUserUtterance(value: string) {
@@ -341,12 +343,14 @@ export class BrowserToolRunner {
 		this.active = false
 		this.generation += 1
 		this.liveCalls.clear()
+		this.desktop.reset()
 	}
 
 	interrupt() {
 		this.generation += 1
 		this.liveCalls.clear()
 		this.windows.clear()
+		this.desktop.reset()
 	}
 
 	setSuspended(value: boolean) {
@@ -467,6 +471,15 @@ export class BrowserToolRunner {
 
 	private async execute(call: FunctionCall, generation: number) {
 		try {
+			if (DESKTOP_TOOLS.some(tool => tool.name === call.name)) {
+				const args = asRecord(JSON.parse(call.arguments ?? '{}'))
+				const output = await this.desktop.execute(call.name!, args, this.utterance, () => this.assertCurrent(generation))
+				if (call.name !== 'desktop_list_apps') {
+					this.snapshot = null
+					this.requiresFreshSnapshot = true
+				}
+				return output
+			}
 			if (!BROWSER_TOOLS.some(tool => tool.name === call.name)) {
 				throw new Error('未対応のブラウザ操作です。')
 			}
