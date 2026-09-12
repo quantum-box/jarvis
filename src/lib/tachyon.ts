@@ -47,9 +47,14 @@ export async function establishTachyonIdentity(baseUrl: string, auth: AuthSessio
   return me;
 }
 
-export async function createChatroom(baseUrl: string, tenantId: string, request: typeof fetch): Promise<string> {
+export async function createChatroom(
+  baseUrl: string,
+  tenantId: string,
+  request: typeof fetch,
+  signal?: AbortSignal,
+): Promise<string> {
   const result = await readJson(await request(`${apiOrigin(baseUrl)}/v1/llms/chatrooms`, {
-    method: 'POST', headers: {'Content-Type': 'application/json', 'x-operator-id': tenantId},
+    method: 'POST', signal, headers: {'Content-Type': 'application/json', 'x-operator-id': tenantId},
     body: JSON.stringify({name: 'JARVIS', metadata: {}}),
   })) as {chatroom?: {id?: string}};
   if (typeof result.chatroom?.id !== 'string' || !result.chatroom.id) throw new Error('チャットルームを作成できませんでした。');

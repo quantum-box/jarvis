@@ -33,6 +33,7 @@ export interface RealtimeBackendConfig {
 
 export interface RealtimeConnectOptions {
 	backend?: RealtimeBackendConfig
+	resolveChatroomId?: (signal: AbortSignal) => Promise<string>
 }
 
 export interface RealtimeTranscript {
@@ -441,6 +442,11 @@ export class Realtime {
 		let candidateTransport: Transport = { ...EMPTY_TRANSPORT }
 		let candidateCallId: string | null = null
 		let candidateProtocol: RealtimeCallInfo['protocol'] | null = null
+		const chatroomId = this.resolveChatroomId(signal)
+		// The resolver intentionally runs alongside microphone and local SDP setup.
+		// Attach a handler now so an early API failure is not reported as an
+		// unhandled rejection before createCall awaits it.
+		void chatroomId.catch(() => undefined)
 
 		try {
 			candidateTransport.peerConnection =
@@ -507,6 +513,7 @@ export class Realtime {
 						offer.sdp ??
 						'',
 					signal,
+					chatroomId,
 				),
 				'tachyon_session',
 				this.startupTimeouts.createCallMs,
@@ -777,6 +784,7 @@ export class Realtime {
 	private async createCall(
 		sdp: string,
 		signal: AbortSignal,
+		chatroomIdPromise: Promise<string>,
 	): Promise<RealtimeCallInfo> {
 		if (!sdp.trim()) {
 			throw new RealtimeError('SDP offer is empty', {
@@ -784,13 +792,14 @@ export class Realtime {
 				 recoverable: false,
 			})
 		}
+		const chatroomId = await chatroomIdPromise
 
 		const live = this.settings.model === 'gpt-live-1'
 		const backend = this.connectOptions.backend
 		const response = await this.dependencies.fetch(
 			makeUrl(
 				this.settings.baseUrl,
-				`/v1/llms/chatrooms/${encodeURIComponent(this.settings.chatroomId)}/agent/${live ? 'live/session' : 'realtime/call'}`,
+				`/v1/llms/chatrooms/${encodeURIComponent(chatroomId)}/agent/${live ? 'live/session' : 'realtime/call'}`,
 			),
 			{
 				method: 'POST',
@@ -873,6 +882,19 @@ export class Realtime {
 					: 'none',
 			protocol: live ? 'live' : 'realtime',
 		}
+	}
+
+	private async resolveChatroomId(signal: AbortSignal): Promise<string> {
+		const existing = this.settings.chatroomId.trim()
+		const resolved = existing || await this.connectOptions.resolveChatroomId?.(signal)
+		if (!resolved?.trim()) {
+			throw new RealtimeError('Chatroom ID is required', {
+				code: 'missing_chatroom_id',
+				recoverable: false,
+			})
+		}
+		this.settings.chatroomId = resolved.trim()
+		return this.settings.chatroomId
 	}
 
 	private async closeLiveSession() {

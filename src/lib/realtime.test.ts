@@ -109,6 +109,46 @@ describe('Realtime', () => {
 		expect(normalizeRealtimeModel('')).toBe(DEFAULT_REALTIME_MODEL)
 	})
 
+	it('prepares a missing chatroom in parallel with microphone startup', async () => {
+		const transport = makeTransport()
+		let resolveMicrophone: ((stream: MediaStream) => void) | undefined
+		let resolveChatroom: ((chatroomId: string) => void) | undefined
+		const microphone = new Promise<MediaStream>(resolve => {
+			resolveMicrophone = resolve
+		})
+		const chatroom = new Promise<string>(resolve => {
+			resolveChatroom = resolve
+		})
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response())
+		const resolveChatroomId = vi.fn(() => chatroom)
+		const getUserMedia = vi.fn(() => microphone)
+		const client = new Realtime(
+			{ ...settings, chatroomId: '' },
+			{},
+			{
+				fetch: fetchMock,
+				createPeerConnection: () => transport.peer as unknown as RTCPeerConnection,
+				getUserMedia,
+			},
+			{ resolveChatroomId },
+		)
+
+		const starting = client.start()
+		expect(resolveChatroomId).toHaveBeenCalledOnce()
+		expect(getUserMedia).toHaveBeenCalledOnce()
+
+		resolveMicrophone?.(transport.stream)
+		await vi.waitFor(() => expect(transport.peer.createOffer).toHaveBeenCalled())
+		expect(fetchMock).not.toHaveBeenCalled()
+
+		resolveChatroom?.('chatroom_created')
+		await starting
+		expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+			'/chatrooms/chatroom_created/agent/realtime/call',
+		)
+		await client.stop()
+	})
+
 	it.each([
 		['gpt-realtime-2.1', 'gpt-realtime-2.1'],
 		['gpt-realtime-2', 'gpt-realtime-2'],
