@@ -21,7 +21,7 @@
 .jarvis-core[data-renderer="webgpu"] .jarvis-core__fallback { opacity: 0; }
 .jarvis-core__fallback {
   transition: opacity 420ms;
-  background: radial-gradient(ellipse at center, #6b3c0818, transparent 60%);
+  background: radial-gradient(ellipse at center, #0878b718, transparent 60%);
   perspective: 700px;
 }
 .jarvis-core__fallback-grid {
@@ -31,39 +31,39 @@
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: repeating-conic-gradient(from 15deg, #f1a42690 0deg .3deg, transparent .4deg 9deg);
+  background: repeating-conic-gradient(from 15deg, #55c9ff90 0deg .3deg, transparent .4deg 9deg);
   mask-image: repeating-radial-gradient(circle, #000 0 1px, transparent 2px 13px);
-  filter: drop-shadow(0 0 4px #ffa520);
+  filter: drop-shadow(0 0 4px #3fc5ff);
 }
 .jarvis-core__fallback-halo {
   position: absolute; top: 50%; left: 50%;
   width: 360px; aspect-ratio: 1; border-radius: 50%;
-  background: radial-gradient(circle, #ffc96528, #d96b070e 45%, transparent 70%);
+  background: radial-gradient(circle, #8de5ff28, #167fd60e 45%, transparent 70%);
   transform: translate(-50%, -50%);
   opacity: calc(.5 + var(--core-level) * .5);
 }
 .jarvis-core__fallback-ring {
   position: absolute; top: 50%; left: 50%;
   width: min(72%, 340px); aspect-ratio: 1;
-  border: 1px solid #e5a029;
+  border: 1px solid #62d2ff;
   border-radius: 50%;
-  background: repeating-conic-gradient(#fdbb4160 0deg 1deg, transparent 1deg 8deg);
+  background: repeating-conic-gradient(#64d6ff60 0deg 1deg, transparent 1deg 8deg);
   mask-image: radial-gradient(circle, transparent 64%, black 66%, black 70%, transparent 72%);
-  filter: drop-shadow(0 0 5px #eaa332);
+  filter: drop-shadow(0 0 5px #4dc8ff);
   animation: jarvis-orbit 28s linear infinite;
 }
 .jarvis-core__fallback-ring--inner { width: min(62%, 280px); animation: jarvis-orbit-cross 23s linear infinite; }
 .jarvis-core__fallback-sphere {
   position: absolute; top: 50%; left: 50%;
   width: 64px; aspect-ratio: 1; border-radius: 50%;
-  border: 1px solid #ffe5a0;
-  background: repeating-radial-gradient(circle, transparent 0 4px, #f8b942 5px 6px, transparent 7px 9px);
-  box-shadow: 0 0 22px #ffc74b80, inset 0 0 20px #ffa32555;
+  border: 1px solid #c6f4ff;
+  background: repeating-radial-gradient(circle, transparent 0 4px, #68d7ff 5px 6px, transparent 7px 9px);
+  box-shadow: 0 0 22px #58ceff80, inset 0 0 20px #239fff55;
   transform: translate(-50%, -50%) scale(calc(1 + var(--core-level) * .2));
 }
-.jarvis-core__fallback-sphere span { position: absolute; inset: 40%; border-radius: 50%; background: #fff5c5; box-shadow: 0 0 18px 6px #ffbb43; }
+.jarvis-core__fallback-sphere span { position: absolute; inset: 40%; border-radius: 50%; background: #e2faff; box-shadow: 0 0 18px 6px #58d5ff; }
 .jarvis-core__fallback-scan { position: absolute; inset: 0; background: repeating-linear-gradient(transparent 0 3px, #090b1030 3px 4px); pointer-events: none; }
-.jarvis-core__status { position: absolute; right: 20px; bottom: 16px; z-index: 3; color: #9b8356; font: 500 9px/1.2 Barlow, sans-serif; letter-spacing: .16em; pointer-events: none; }
+.jarvis-core__status { position: absolute; right: 20px; bottom: 16px; z-index: 3; color: #6e9eb3; font: 500 9px/1.2 Barlow, sans-serif; letter-spacing: .16em; pointer-events: none; }
 @keyframes jarvis-orbit { from { transform: translate(-50%, -50%) rotateZ(-25deg) rotateY(60deg) rotateZ(0deg); } to { transform: translate(-50%, -50%) rotateZ(-25deg) rotateY(60deg) rotateZ(360deg); } }
 @keyframes jarvis-orbit-cross { from { transform: translate(-50%, -50%) rotateZ(40deg) rotateY(55deg) rotateZ(360deg); } to { transform: translate(-50%, -50%) rotateZ(40deg) rotateY(55deg) rotateZ(0deg); } }
 @media (prefers-reduced-motion: reduce) { .jarvis-core__fallback-ring { animation: none; } .jarvis-core__canvas, .jarvis-core__fallback { transition: none; } }

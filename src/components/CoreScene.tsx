@@ -151,14 +151,14 @@ fn sphereSurface(
   let opacity = select(1.0, 0.34, backFace);
   let light = normalize(vec3f(-0.42, 0.72, 0.52));
   let diffuse = max(dot(normal, light), 0.0);
-  let amber = vec3f(1.0, 0.42, 0.035);
-  let gold = vec3f(1.0, 0.78, 0.26);
+  let azure = vec3f(0.08, 0.48, 1.0);
+  let iceBlue = vec3f(0.38, 0.86, 1.0);
   let toneAmount = clamp(0.48 + orbital * 0.25 + circuit * 0.27, 0.0, 1.0);
-  let tone = amber + (gold - amber) * toneAmount;
+  let tone = azure + (iceBlue - azure) * toneAmount;
   let lines = (circuit * (0.95 + level * 0.4) + orbital * 1.42 + spark * 0.92) * opacity;
   let rim = edge * (0.035 + level * 0.045) * opacity;
   let shaded = 0.62 + diffuse * 0.55;
-  return tone * (lines + rim) * shaded + vec3f(1.0, 0.72, 0.21) * spark * 0.55 * opacity;
+  return tone * (lines + rim) * shaded + vec3f(0.64, 0.93, 1.0) * spark * 0.55 * opacity;
 }
 
 fn shellLayer(
@@ -193,11 +193,11 @@ fn hotCore(origin: vec3f, direction: vec3f, time: f32, level: f32, activity: f32
   let circuit = circuitPattern(point, time * 1.2, 8.0);
   let light = max(dot(normal, normalize(vec3f(-0.32, 0.75, 0.5))), 0.0);
   let pulse = 1.0 + 0.18 * sin(time * 2.4) * (0.4 + activity * 0.6);
-  let whiteHot = vec3f(1.0, 0.96, 0.72) * (0.55 + facing * 0.45) * pulse;
-  let goldHot = vec3f(1.0, 0.47, 0.055) * (0.42 + light * 0.6 + ring * 0.78 + circuit * 0.31);
+  let whiteHot = vec3f(0.82, 0.97, 1.0) * (0.55 + facing * 0.45) * pulse;
+  let blueHot = vec3f(0.08, 0.54, 1.0) * (0.42 + light * 0.6 + ring * 0.78 + circuit * 0.31);
   let coreLatitude = softLine(fract(normal.y * 5.0 + time * 0.08) - 0.5, 0.12);
   let coreLongitude = softLine(fract(atan2(normal.z, normal.x) * 2.0) - 0.5, 0.10);
-  return (whiteHot * 0.45 + goldHot * 0.45) * (coreLatitude + coreLongitude + ring * 0.45 + 0.04);
+  return (whiteHot * 0.45 + blueHot * 0.45) * (coreLatitude + coreLongitude + ring * 0.45 + 0.04);
 }
 
 @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
@@ -214,8 +214,8 @@ fn hotCore(origin: vec3f, direction: vec3f, time: f32, level: f32, activity: f32
   let vignette = 1.0 - smoothstep(0.36, 1.56, radius);
   let scanline = 0.5 + 0.5 * sin(screen.y * safeResolution.y * 0.033 + time * 1.3);
   let horizon = exp(-20.0 * abs(screen.y + 0.35)) * 0.024;
-  let ambient = vec3f(0.031, 0.043, 0.063) + vec3f(0.015, 0.012, 0.008) * vignette;
-  var color = ambient + vec3f(0.022, 0.012, 0.004) * scanline * vignette + vec3f(0.16, 0.048, 0.006) * horizon;
+  let ambient = vec3f(0.025, 0.043, 0.068) + vec3f(0.006, 0.014, 0.022) * vignette;
+  var color = ambient + vec3f(0.004, 0.014, 0.026) * scanline * vignette + vec3f(0.006, 0.075, 0.16) * horizon;
 
   let origin = vec3f(0.0, 0.0, 3.55);
   let breath = 0.86 + thinking * (0.05 + sin(params.pulse * 3.0) * 0.025) + speaking * (0.07 + level * 0.18);
@@ -234,17 +234,17 @@ fn hotCore(origin: vec3f, direction: vec3f, time: f32, level: f32, activity: f32
   let innerHalo = exp(-12.0 * abs(radius - (0.36 + level * 0.024))) * (0.12 + activity * 0.14);
   let outerHalo = exp(-15.0 * abs(radius - 0.88)) * (0.045 + activity * 0.075);
   let coreBloom = exp(-20.0 * radius * radius) * (0.16 + activity * 0.12) + exp(-180.0 * radius * radius) * 0.35;
-  color += vec3f(1.0, 0.27, 0.018) * innerHalo;
-  color += vec3f(1.0, 0.48, 0.05) * outerHalo;
-  color += vec3f(1.0, 0.74, 0.22) * coreBloom;
+  color += vec3f(0.06, 0.5, 1.0) * innerHalo;
+  color += vec3f(0.18, 0.72, 1.0) * outerHalo;
+  color += vec3f(0.56, 0.9, 1.0) * coreBloom;
 
   let grid = smoothstep(0.965, 1.0, abs(sin(screen.x * 20.0)) * abs(sin(screen.y * 16.0)));
-  color += vec3f(0.08, 0.028, 0.004) * grid * vignette * (0.25 + level * 0.32);
+  color += vec3f(0.004, 0.04, 0.09) * grid * vignette * (0.25 + level * 0.32);
 
   let speckCell = floor((screen + 2.0) * 29.0);
   let speck = step(0.994, hash21(speckCell));
   let speckDistance = smoothstep(1.2, 0.18, radius);
-  color += vec3f(1.0, 0.33, 0.035) * speck * speckDistance * (0.13 + level * 0.16);
+  color += vec3f(0.18, 0.7, 1.0) * speck * speckDistance * (0.13 + level * 0.16);
 
   color *= vignette * 0.94 + 0.06;
   color = pow(max(color, vec3f(0.0)), vec3f(0.82));
