@@ -267,18 +267,33 @@ export default function App() {
       : null;
     browserTools.current?.setSuspended(browserExecutionObscured);
     try {
-      const token = await auth.getAccessToken();
-      if (attempt !== connectionAttempt.current || authRef.current !== auth) return;
       const transport = {fetch: userTokenFetch(settings.baseUrl, auth, isTauri() ? nativeFetch : fetch)};
-      const chatroomId = settings.chatroomId.trim() || await createChatroom(settings.baseUrl, settings.tenantId, transport.fetch);
-      if (attempt !== connectionAttempt.current || authRef.current !== auth) return;
-      setSettings(previous => ({...previous, chatroomId}));
+      const chatroomId = settings.chatroomId.trim();
+      const connectOptions = browserAvailable && normalizeRealtimeModel(settings.model) === DEFAULT_REALTIME_MODEL
+        ? browserBackendConfig(settings.instructions)
+        : {};
       await next.connect(
-        {...settings, chatroomId, token},
+        {...settings, chatroomId, token: ''},
         transport,
-        browserAvailable && normalizeRealtimeModel(settings.model) === DEFAULT_REALTIME_MODEL
-          ? browserBackendConfig(settings.instructions)
-          : {},
+        {
+          ...connectOptions,
+          resolveChatroomId: chatroomId ? undefined : async signal => {
+            const created = await createChatroom(
+              settings.baseUrl,
+              settings.tenantId,
+              transport.fetch,
+              signal,
+            );
+            if (attempt === connectionAttempt.current && authRef.current === auth) {
+              setSettings(previous => (
+                previous.baseUrl === settings.baseUrl && previous.tenantId === settings.tenantId
+                  ? {...previous, chatroomId: created}
+                  : previous
+              ));
+            }
+            return created;
+          },
+        },
       );
     } catch (e) {
       if (client.current !== next || connectionAttempt.current !== attempt) return;
