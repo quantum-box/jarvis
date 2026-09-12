@@ -465,7 +465,7 @@ export class BrowserToolRunner {
 			(this.generation === 0 ? 0 : undefined)
 		this.responseGenerations.delete(correlationId)
 		if (responseId && responseId !== correlationId) this.responseGenerations.delete(responseId)
-		if (!this.active) return
+		if (!this.active || this.suspended) return
 		// Use a deliberately stale generation when response.created was not seen.
 		// enqueue() will return a cancellation output instead of executing the call.
 		this.enqueue(calls, 'live', generation ?? Number.NaN)
