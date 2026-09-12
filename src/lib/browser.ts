@@ -195,6 +195,25 @@ Do not work around a denied authorization. Never retry a mutation after timeout,
 For send, purchase, delete, permission, publish, save, or other committing actions, act only when the current user request explicitly asks for that exact action.
 `;
 
+export const BROWSER_LIVE_INSTRUCTIONS = `
+Delegation policy:
+Backend tools:
+- JARVIS browser: JARVIS内でWebページを開き、読み取り、クリックや入力を行えます。ブラウザウィンドウの作成、一覧、切り替え、移動、サイズ変更、最小化、復元、閉じる操作ができます。
+
+Delegate to the backend when:
+- ユーザーがWebサイトやページを開く、移動する、読む、操作するよう依頼したとき。
+- ユーザーがJARVIS内のブラウザウィンドウの作成、一覧、切り替え、移動、サイズ変更、最小化、復元、または閉じる操作を依頼したとき。
+
+Do not delegate to the backend when:
+- 挙拶や、すでに得た結果を言い直すだけのとき。
+- 操作対象が曖昧で、まず短い確認質問が必要なとき。
+
+バックエンドの作業結果に依存する回答は、必ず回答前に委譲してください。
+上記の機能を依頼されたときは、委譲する前に「できない」と答えないでください。
+作業中は結果を推測しないでください。
+ユーザーが会話の終了を明示したときは、短い別れの挨拶だけを返してください。
+`;
+
 export function browserSessionConfig(instructions: string): RealtimeEvent {
 	return {
 		type: 'session.update',
@@ -209,6 +228,7 @@ export function browserSessionConfig(instructions: string): RealtimeEvent {
 
 export function browserBackendConfig(instructions: string): RealtimeConnectOptions {
 	return {
+		liveInstructions: `${instructions}${BROWSER_LIVE_INSTRUCTIONS}`,
 		backend: {
 			instructions: `${instructions}${BROWSER_INSTRUCTIONS}${DESKTOP_INSTRUCTIONS}`,
 			tools: [...BROWSER_TOOLS, ...DESKTOP_TOOLS],
@@ -348,7 +368,9 @@ export class BrowserToolRunner {
 
 	interrupt() {
 		this.generation += 1
-		this.liveCalls.clear()
+		// Keep already announced Live calls until their terminal response arrives.
+		// Each call still needs a function output even when a newer utterance makes
+		// the associated operation stale.
 		this.windows.clear()
 		this.desktop.reset()
 	}
@@ -362,7 +384,7 @@ export class BrowserToolRunner {
 	}
 
 	handle(event: RealtimeEvent) {
-		if (event.type === 'input_audio_buffer.speech_started' || event.type === 'session.input_transcript.delta') {
+		if (event.type === 'input_audio_buffer.speech_started') {
 			this.utterance = ''
 			this.interrupt()
 			return
@@ -407,7 +429,8 @@ export class BrowserToolRunner {
 		if (nestedType === 'response.created') {
 			const response = nested.response && typeof nested.response === 'object' && !Array.isArray(nested.response)
 				? nested.response as Record<string, unknown> : undefined
-			const responseId = response && typeof response.id === 'string' ? response.id : delegationId
+			const responseId = response && typeof response.id === 'string' ? response.id : undefined
+			if (delegationId) this.responseGenerations.set(delegationId, this.generation)
 			if (responseId) this.responseGenerations.set(responseId, this.generation)
 			return
 		}
@@ -415,11 +438,14 @@ export class BrowserToolRunner {
 			if (!nested.item || typeof nested.item !== 'object' || Array.isArray(nested.item)) return
 			const item = nested.item as FunctionCall
 			if (item.type !== 'function_call' || !item.call_id) return
-			const responseId = typeof nested.response_id === 'string' ? nested.response_id : delegationId
-			if (!responseId) return
-			const calls = this.liveCalls.get(responseId) ?? []
+			// Responses stream items do not consistently carry response_id. The outer
+			// delegation_id is the stable correlation key across the nested lifecycle.
+			const correlationId = delegationId ??
+				(typeof nested.response_id === 'string' ? nested.response_id : undefined)
+			if (!correlationId) return
+			const calls = this.liveCalls.get(correlationId) ?? []
 			if (!calls.some(call => call.call_id === item.call_id)) calls.push(item)
-			this.liveCalls.set(responseId, calls)
+			this.liveCalls.set(correlationId, calls)
 			return
 		}
 		if (nestedType !== 'response.completed') return
@@ -428,15 +454,21 @@ export class BrowserToolRunner {
 			: undefined
 		const responseId =
 			(response && typeof response.id === 'string' ? response.id : undefined) ??
-			(typeof nested.response_id === 'string' ? nested.response_id : undefined) ??
-			delegationId
-		if (!responseId) return
-		const calls = this.liveCalls.get(responseId) ?? []
-		this.liveCalls.delete(responseId)
-		const generation = this.responseGenerations.get(responseId) ?? (this.generation === 0 ? 0 : undefined)
-		this.responseGenerations.delete(responseId)
-		if (generation === undefined || generation !== this.generation || this.suspended) return
-		this.enqueue(calls, 'live', generation)
+			(typeof nested.response_id === 'string' ? nested.response_id : undefined)
+		const correlationId = delegationId ?? responseId
+		if (!correlationId) return
+		const calls = this.liveCalls.get(correlationId) ?? []
+		this.liveCalls.delete(correlationId)
+		const generation =
+			this.responseGenerations.get(correlationId) ??
+			(responseId ? this.responseGenerations.get(responseId) : undefined) ??
+			(this.generation === 0 ? 0 : undefined)
+		this.responseGenerations.delete(correlationId)
+		if (responseId && responseId !== correlationId) this.responseGenerations.delete(responseId)
+		if (!this.active) return
+		// Use a deliberately stale generation when response.created was not seen.
+		// enqueue() will return a cancellation output instead of executing the call.
+		this.enqueue(calls, 'live', generation ?? Number.NaN)
 	}
 
 	private enqueue(calls: FunctionCall[], protocol: ToolProtocol, generation: number) {
@@ -445,12 +477,20 @@ export class BrowserToolRunner {
 			.then(async () => {
 				let executed = false
 				for (const call of calls) {
-					if (!this.active || generation !== this.generation) return
+					if (!this.active) return
 					if (!call.call_id || this.seen.has(call.call_id)) continue
 					this.seen.add(call.call_id)
 					executed = true
-					const output = await this.execute(call, generation)
-					if (!this.active || generation !== this.generation) return
+					const output = generation === this.generation
+						? await this.execute(call, generation)
+						: {
+							error: 'ユーザーの新しい発話により、このブラウザ操作は中断されました。',
+							retryAutomatically: false,
+						}
+					// A pending function call must always receive an output while the Live
+					// session is active. Otherwise the delegated response remains blocked
+					// after an interruption and later user turns receive no response.
+					if (!this.active) return
 					this.client.sendEvent({
 						type: protocol === 'live' ? 'response.item.create' : 'conversation.item.create',
 						item: {
@@ -460,7 +500,7 @@ export class BrowserToolRunner {
 						},
 					})
 				}
-				if (this.active && generation === this.generation && executed) {
+				if (this.active && executed) {
 					this.client.sendEvent({ type: 'response.create' })
 				}
 			})

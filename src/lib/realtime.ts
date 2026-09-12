@@ -32,6 +32,7 @@ export interface RealtimeBackendConfig {
 }
 
 export interface RealtimeConnectOptions {
+	liveInstructions?: string
 	backend?: RealtimeBackendConfig
 	resolveChatroomId?: (signal: AbortSignal) => Promise<string>
 }
@@ -810,7 +811,9 @@ export class Realtime {
 							provider: 'openai',
 							session: {
 								model: this.settings.model,
-								instructions: this.settings.instructions || undefined,
+								instructions:
+									(this.connectOptions.liveInstructions ?? this.settings.instructions) ||
+									undefined,
 								delegation: {
 									type: 'responses',
 									responses: {
@@ -1359,6 +1362,7 @@ export interface TranscriptItem {
 	id: string
 	role: 'user' | 'assistant'
 	text: string
+	final: boolean
 }
 
 export interface RealtimeClientCallbacks {
@@ -1427,6 +1431,7 @@ export class RealtimeClient {
 						id: transcript.id,
 						role: transcript.role,
 						text: transcript.text,
+						final: transcript.final,
 					})
 				},
 				error: error => {
