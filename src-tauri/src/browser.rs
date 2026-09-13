@@ -24,6 +24,13 @@ pub struct BrowserStatus {
     opacity: f64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserLocation {
+    id: String,
+    url: String,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -52,17 +59,22 @@ mod platform {
     const LABEL_PREFIX: &str = "managed-browser";
     const COOKIE_HELPER_LABEL: &str = "managed-browser-cookie-store";
     const STATUS_EVENT: &str = "managed-browser-status";
+    const LOCATION_EVENT: &str = "managed-browser-location";
     const ACTIVATED_EVENT: &str = "managed-browser-activated";
     const DEFAULT_URL: &str = "https://www.google.com/";
     const BLANK_URL: &str = "about:blank";
     const FRAME_TOP: f64 = 92.0;
     const FRAME_MARGIN: f64 = 16.0;
     const FRAME_BORDER: f64 = 7.0;
+    const FRAME_TOOLBAR_HEIGHT: f64 = 38.0;
     const MACOS_TITLEBAR_HEIGHT: f64 = 28.0;
     const MIN_FRAME_WIDTH: f64 = 520.0;
     const MIN_FRAME_HEIGHT: f64 = 360.0;
     const DEFAULT_WEBVIEW_OPACITY: f64 = 0.9;
     const MIN_WEBVIEW_OPACITY: f64 = 0.35;
+    // Keep this identifier stable: every managed browser and the hidden Cookie
+    // importer must use the same isolated WebKit website data store.
+    const BROWSER_DATA_STORE_ID: [u8; 16] = *b"JARVIS-BROWSER-1";
     static BROWSER_CONTENT_VISIBLE: AtomicBool = AtomicBool::new(true);
     static NEXT_BROWSER_ID: AtomicU64 = AtomicU64::new(1);
     static NEXT_Z_ORDER: AtomicU64 = AtomicU64::new(1);
@@ -310,12 +322,12 @@ mod platform {
         Ok(Rect {
             position: LogicalPosition::new(
                 bounds.x + FRAME_BORDER + content_offset_x,
-                bounds.y + FRAME_BORDER + content_offset_y,
+                bounds.y + FRAME_BORDER + FRAME_TOOLBAR_HEIGHT + content_offset_y,
             )
             .into(),
             size: LogicalSize::new(
                 bounds.width - FRAME_BORDER * 2.0,
-                bounds.height - FRAME_BORDER * 2.0,
+                bounds.height - FRAME_BORDER * 2.0 - FRAME_TOOLBAR_HEIGHT,
             )
             .into(),
         })
@@ -342,6 +354,17 @@ mod platform {
         if let Ok(status) = status_by_id(app, id) {
             let _ = app.emit_to("main", STATUS_EVENT, status);
         }
+    }
+
+    fn emit_location(app: &AppHandle, id: &str, url: &tauri::Url) {
+        let _ = app.emit_to(
+            "main",
+            LOCATION_EVENT,
+            BrowserLocation {
+                id: id.to_string(),
+                url: url.to_string(),
+            },
+        );
     }
 
     fn next_frame(app: &AppHandle, order: u64) -> Result<BrowserBounds, String> {
@@ -407,12 +430,19 @@ mod platform {
         };
         let page_load_app = app.clone();
         let page_load_id = id.clone();
+        let navigation_app = app.clone();
+        let navigation_id = id.clone();
         let title_app = app.clone();
         let title_id = id.clone();
         let builder = WebviewBuilder::new(&id, WebviewUrl::External(url))
             .data_directory(data_dir)
-            .on_navigation(|candidate| {
-                is_blank_url(candidate) || validate_url(candidate.as_str()).is_ok()
+            .data_store_identifier(BROWSER_DATA_STORE_ID)
+            .on_navigation(move |candidate| {
+                let allowed = is_blank_url(candidate) || validate_url(candidate.as_str()).is_ok();
+                if allowed {
+                    emit_location(&navigation_app, &navigation_id, candidate);
+                }
+                allowed
             })
             .on_new_window(|_, _| NewWindowResponse::Deny)
             .on_download(|_, _| false)
@@ -424,6 +454,7 @@ mod platform {
                             meta.finished_page_url = payload.url().to_string();
                         }
                     }
+                    emit_location(&page_load_app, &page_load_id, payload.url());
                     emit_status(&page_load_app, &page_load_id);
                 }
             })
@@ -495,6 +526,7 @@ mod platform {
         }
         let builder = WebviewBuilder::new(COOKIE_HELPER_LABEL, WebviewUrl::External(blank_url()?))
             .data_directory(browser_data_dir(app)?)
+            .data_store_identifier(BROWSER_DATA_STORE_ID)
             .on_navigation(is_blank_url)
             .on_new_window(|_, _| NewWindowResponse::Deny)
             .on_download(|_, _| false);
@@ -515,8 +547,8 @@ mod platform {
     }
 
     pub fn ensure_webview(app: &AppHandle, visible: bool) -> Result<Webview, String> {
-        if let Ok((id, browser)) = webview(app) {
-            if visible {
+        if visible {
+            if let Ok((id, browser)) = webview(app) {
                 if let Ok(mut browsers) = browsers().lock() {
                     if let Some(meta) = browsers.get_mut(&id) {
                         meta.visible = true;
@@ -527,12 +559,13 @@ mod platform {
                     .map_err(|_| "ブラウザを表示できませんでした。".to_string())?;
                 raise(&browser)?;
                 let _ = browser.set_focus();
+                return Ok(browser);
             }
-            return Ok(browser);
-        }
-        if visible {
             create_webview(app, blank_url()?, true, None).map(|(_, browser)| browser)
         } else {
+            // Always write imported Cookies through the dedicated view. It uses the
+            // same data-store identifier as every visible managed browser, including
+            // windows created after the import.
             cookie_store_webview(app)
         }
     }
@@ -718,8 +751,24 @@ mod platform {
         Ok(status)
     }
 
-    pub async fn navigate(app: &AppHandle, url: String) -> Result<BrowserStatus, String> {
-        let (id, browser) = webview(app)?;
+    pub async fn navigate(
+        app: &AppHandle,
+        url: String,
+        requested_id: Option<String>,
+    ) -> Result<BrowserStatus, String> {
+        let (id, browser) = if let Some(id) = requested_id {
+            // Reject non-managed labels such as the hidden Cookie helper.
+            status_by_id(app, &id)?;
+            let browser = webview_by_id(app, &id)?;
+            (id, browser)
+        } else if let Ok(browser) = webview(app) {
+            browser
+        } else {
+            return open(app, Some(url), None).await;
+        };
+        set_active(&id);
+        raise(&browser)?;
+        let _ = app.emit_to("main", ACTIVATED_EVENT, id.clone());
         let target = validate_url(&url)?;
         let fragment_only = browser
             .url()
@@ -782,6 +831,20 @@ mod platform {
         } else {
             Ok(closed_status(String::new()))
         }
+    }
+
+    pub fn current_url(app: &AppHandle, id: &str) -> Result<String, String> {
+        let managed = browsers()
+            .lock()
+            .ok()
+            .is_some_and(|browsers| browsers.contains_key(id));
+        if !managed {
+            return Err("ブラウザが見つかりませんでした。".into());
+        }
+        webview_by_id(app, id)?
+            .url()
+            .map(|url| url.to_string())
+            .map_err(|_| "現在のURLを取得できませんでした。".to_string())
     }
 
     pub fn list(app: &AppHandle) -> Vec<BrowserStatus> {
@@ -1514,12 +1577,16 @@ pub async fn browser_create(app: AppHandle) -> Result<BrowserStatus, String> {
 }
 
 #[tauri::command]
-pub async fn browser_navigate(app: AppHandle, url: String) -> Result<BrowserStatus, String> {
+pub async fn browser_navigate(
+    app: AppHandle,
+    url: String,
+    id: Option<String>,
+) -> Result<BrowserStatus, String> {
     #[cfg(target_os = "macos")]
-    return platform::navigate(&app, url).await;
+    return platform::navigate(&app, url, id).await;
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, url);
+        let _ = (app, url, id);
         Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
@@ -1541,6 +1608,17 @@ pub async fn browser_status(app: AppHandle) -> Result<BrowserStatus, String> {
             bounds: None,
             opacity: 1.0,
         })
+    }
+}
+
+#[tauri::command]
+pub async fn browser_current_url(app: AppHandle, id: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return platform::current_url(&app, &id);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 

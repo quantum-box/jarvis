@@ -3,6 +3,7 @@ import {
 	BrowserToolRunner,
 	browserBackendConfig,
 	isMacDesktopEnvironment,
+	normalizeBrowserAddress,
 	type BrowserSnapshot,
 	type browserRequest,
 } from './browser'
@@ -305,6 +306,34 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations).toEqual([])
 	})
 
+	it('allows an exact URL with a path when the user directly requests it', async () => {
+		const f = fixture()
+		f.runner.setUserUtterance('https://example.com/account/settings を開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/account/settings' }, 'exact-url-navigation'))
+		await f.runner.settled()
+		expect(f.approve).not.toHaveBeenCalled()
+		expect(f.operations).toEqual([{ operation: 'navigate', args: { url: 'https://example.com/account/settings' } }])
+	})
+
+	it('requires approval when the model URL is only a prefix of the requested URL', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('open https://example.com/delete-account-preview')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/delete-account' }, 'prefix-url-navigation'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
+
+	it('canonicalizes an explicitly requested URL before comparing it', async () => {
+		const f = fixture()
+		f.runner.setUserUtterance('HTTPS://EXAMPLE.COM:443/account を開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/account' }, 'canonical-url-navigation'))
+		await f.runner.settled()
+		expect(f.approve).not.toHaveBeenCalled()
+		expect(f.operations).toEqual([{ operation: 'navigate', args: { url: 'https://example.com/account' } }])
+	})
+
 	it('requires approval when a named host is given a model-invented non-default port', async () => {
 		const approve = vi.fn(async () => false)
 		const f = fixture(approve)
@@ -602,12 +631,26 @@ describe('browserBackendConfig', () => {
 		const config = browserBackendConfig('You are JARVIS.')
 		expect(config.liveInstructions).toEqual(expect.stringContaining('Delegation policy:'))
 		expect(config.liveInstructions).toEqual(expect.stringContaining('ブラウザウィンドウ'))
+		expect(config.liveInstructions).toEqual(expect.stringContaining('JARVIS内のブラウザを標準'))
+		expect(config.backend?.instructions).toEqual(expect.stringContaining('use the JARVIS in-app browser tools by default'))
 		expect(config.backend).toMatchObject({
 			instructions: expect.stringContaining('You are JARVIS.'),
 			toolChoice: 'auto',
 			parallelToolCalls: false,
 		})
 		expect(config.backend?.tools?.map(tool => tool.name)).toContain('browser_snapshot')
+	})
+})
+
+describe('normalizeBrowserAddress', () => {
+	it('adds HTTPS to a hostname entered in the in-app address bar', () => {
+		expect(normalizeBrowserAddress(' example.com/path ')).toBe('https://example.com/path')
+	})
+
+	it('preserves a complete URL and rejects credentials or non-web schemes', () => {
+		expect(normalizeBrowserAddress('https://example.com/a?q=1')).toBe('https://example.com/a?q=1')
+		expect(() => normalizeBrowserAddress('https://user:secret@example.com')).toThrow('認証情報')
+		expect(() => normalizeBrowserAddress('javascript://example.com')).toThrow('HTTPS')
 	})
 })
 

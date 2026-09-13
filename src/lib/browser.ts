@@ -14,6 +14,11 @@ export interface BrowserStatus {
 	opacity: number
 }
 
+export interface BrowserLocation {
+	id: string
+	url: string
+}
+
 export interface BrowserBounds {
 	x: number
 	y: number
@@ -91,10 +96,37 @@ export const saveBrowserOpacity = (opacity: number) => {
 	localStorage.setItem(BROWSER_OPACITY_KEY, String(opacity))
 }
 
+export const normalizeBrowserAddress = (value: string) => {
+	const trimmed = value.trim()
+	if (!trimmed) throw new Error('URLを入力してください。')
+	const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)
+		? trimmed
+		: `https://${trimmed}`
+	let url: URL
+	try {
+		url = new URL(candidate)
+	} catch {
+		throw new Error('URLが正しくありません。')
+	}
+	if (!['https:', 'http:'].includes(url.protocol)) {
+		throw new Error('HTTPSのURLを指定してください。')
+	}
+	if (url.username || url.password) {
+		throw new Error('認証情報を含むURLは開けません。')
+	}
+	return url.toString()
+}
+
 export const browserRequest = <T = unknown>(
 	operation: string,
 	args: Record<string, unknown> = {},
 ) => invoke<T>(`browser_${operation}`, args)
+
+// This deliberately stays outside the model-facing browser tool surface. The
+// full URL can contain sensitive path, query, or fragment data and is used only
+// by the in-app address bar.
+export const browserCurrentUrl = (id: string) =>
+	invoke<string>('browser_current_url', { id })
 
 const tool = (
 	name: string,
@@ -144,11 +176,11 @@ export const BROWSER_TOOLS = [
 	}),
 	tool(
 		'browser_open',
-		'Open the managed browser window inside JARVIS. A URL is optional; omit it to preserve the current page or open the default start page.',
+		'Open the in-app browser window inside JARVIS. A URL is optional; omit it to preserve the current page or open the default start page. This is the default for page and website requests and does not need macOS Accessibility permission.',
 		{ url: { type: 'string' } },
 		[],
 	),
-	tool('browser_navigate', 'Navigate to an explicit HTTPS URL.', {
+	tool('browser_navigate', 'Navigate the active JARVIS in-app browser to an explicit HTTPS URL, opening the in-app browser if necessary.', {
 		url: { type: 'string' },
 	}),
 	tool(
@@ -183,6 +215,8 @@ export const BROWSER_TOOLS = [
 
 export const BROWSER_INSTRUCTIONS = `
 You can use a local managed browser window inside JARVIS only for the user's current request.
+For every unqualified website, page, URL, browser, or window request, use the JARVIS in-app browser tools by default. Do not use desktop_* tools or an external browser unless the user explicitly names an external application or asks to operate outside JARVIS. The in-app browser does not require macOS Accessibility permission.
+When the user provides a URL or hostname, call browser_open with that URL directly. It reuses the active in-app window and opens one if needed; browser_list is not required first. Use browser_navigate after a page snapshot when continuing work in the active in-app window.
 For window management, call browser_list first and select the exact id by the user's requested title, site, position, or order. Use active_browser_id for "this window". If the target is ambiguous, ask which window; never choose arbitrarily.
 Use browser_set_bounds to move, resize, center, or maximize within JARVIS. Use the returned workspace and minimum_size; preserve unspecified bounds. For "left/right half", calculate the bounds from the workspace. Use browser_set_visible to minimize/restore and browser_activate to switch windows. These operations affect only JARVIS browser windows, not the macOS desktop or external apps.
 After switching, restoring, or moving/resizing a window, take a new browser_snapshot before interacting with its page. Before closing a different window, activate it and take a new snapshot. Use browser_create only for an explicitly requested additional window.
@@ -203,6 +237,8 @@ Backend tools:
 Delegate to the backend when:
 - ユーザーがWebサイトやページを開く、移動する、読む、操作するよう依頼したとき。
 - ユーザーがJARVIS内のブラウザウィンドウの作成、一覧、切り替え、移動、サイズ変更、最小化、復元、または閉じる操作を依頼したとき。
+
+Webサイト、ページ、URL、ブラウザ、または単に「ウィンドウ」とだけ指定された依頼は、JARVIS内のブラウザを標準で使用してください。外部アプリ名が明示された場合だけdesktop_* toolsを使用してください。URLが指定された場合はbrowser_openへ直接渡せます。
 
 Do not delegate to the backend when:
 - 挙拶や、すでに得た結果を言い直すだけのとき。
@@ -292,6 +328,22 @@ const negationWords =
 
 const utteranceHasNegation = (utterance: string) => negationWords.test(utterance)
 
+const canonicalUrl = (value: string) => {
+	try {
+		return new URL(value).toString()
+	} catch {
+		return null
+	}
+}
+
+const urlTokens = (clause: string) =>
+	(clause.match(/https?:\/\/[^\s\u3000"'<>]+/gi) ?? [])
+		.map(token => token
+			.replace(/(?:を|に|へ)?(?:開いて(?:ください)?|行って(?:ください)?|アクセスして(?:ください)?|移動して(?:ください)?)$/i, '')
+			.replace(/[\])}>、。！？!?；;，,.]+$/g, ''))
+		.map(canonicalUrl)
+		.filter((url): url is string => url !== null)
+
 const typingWords =
 	/(入力して|入力する|記入して|記入する|タイプして|タイプする|書き込んで|書き込む|貼り付けて|貼り付ける|ペーストして|ペーストする|打ち込んで|打ち込む|書いて|入れて|\b(?:type|enter|fill|write|paste)\b)/i
 
@@ -316,6 +368,11 @@ const utteranceRequestsHostnameNavigation = (utterance: string, hostname: string
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
+		const canonicalDestination = url.toString()
+		const exactlyRequestsUrl = utterance.split(/[。！？!?；;,，、\n]+/).some(clause =>
+			/(?:開いて|行って|アクセスして|移動して|open|visit|go\s+to|navigate\s+to)/i.test(clause) &&
+			urlTokens(clause).some(token => token === canonicalDestination))
+		if (!utteranceHasNegation(utterance) && exactlyRequestsUrl) return true
 		const destinationName = url.port && url.port !== '443' ? url.host : url.hostname
 		return (
 			!utteranceHasNegation(utterance) &&

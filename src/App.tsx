@@ -48,6 +48,7 @@ import {
   isAssistantResponseStartEvent,
   isConversationEndRequest,
 } from "./lib/conversation";
+import { desktopRequest, shouldRequestAccessibilityOnLaunch } from './lib/desktop';
 
 const CONVERSATION_END_FALLBACK_MS = 15_000;
 
@@ -109,6 +110,12 @@ export default function App() {
     if (!browserAvailable) return;
     void browserRequest('set_opacity', { opacity: loadBrowserOpacity() })
       .catch(e => setError(e instanceof Error ? e.message : String(e)));
+  }, [browserAvailable]);
+  useEffect(() => {
+    if (!browserAvailable || !shouldRequestAccessibilityOnLaunch()) return;
+    // The native macOS dialog is asynchronous. Settings refreshes the actual
+    // permission when the app regains focus, so declining here is not an error.
+    void desktopRequest<boolean>('request_accessibility').catch(() => undefined);
   }, [browserAvailable]);
   useEffect(() => {
     let removeListener: (() => void) | undefined;

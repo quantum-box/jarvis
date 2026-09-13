@@ -202,6 +202,7 @@ mod platform {
         array::CFArray,
         base::{CFRelease, CFRetain, CFType, CFTypeRef, TCFType},
         boolean::CFBoolean,
+        dictionary::{CFDictionary, CFDictionaryRef},
         string::{CFString, CFStringRef},
     };
     use objc2::{rc::Retained, MainThreadMarker};
@@ -261,6 +262,8 @@ mod platform {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
         fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
         fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> AXError;
         fn AXUIElementCopyAttributeValue(
@@ -284,6 +287,17 @@ mod platform {
 
     fn accessibility_granted() -> bool {
         unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    pub fn request_accessibility() -> bool {
+        if accessibility_granted() {
+            return true;
+        }
+        let prompt_key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
+        let options = CFDictionary::from_CFType_pairs(&[(prompt_key, CFBoolean::true_value())]);
+        // The system prompt is asynchronous. Returning false here means the caller
+        // should refresh the status when JARVIS becomes active again.
+        unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0 }
     }
 
     fn ax_error(error: AXError, operation: &str) -> String {
@@ -884,6 +898,7 @@ mod platform {
     pub fn open_accessibility_settings() -> Result<bool, String> {
         // This entry point is called only by the user's settings button, never an AI tool.
         let _ = MainThreadMarker::new().ok_or("設定を開けませんでした。")?;
+        request_accessibility();
         if !CGPreflightPostEventAccess() {
             CGRequestPostEventAccess();
         }
@@ -894,7 +909,7 @@ mod platform {
         if !NSWorkspace::sharedWorkspace().openURL(&url) {
             return Err("システム設定からアクセシビリティを開いてください。".into());
         }
-        Ok(CGPreflightPostEventAccess())
+        Ok(accessibility_granted())
     }
 }
 
@@ -1062,6 +1077,19 @@ pub async fn desktop_open_accessibility_settings(app: AppHandle) -> Result<bool,
     #[cfg(target_os = "macos")]
     {
         platform::on_main(app, platform::open_accessibility_settings).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("外部アプリ操作はmacOS版で利用できます。".into())
+    }
+}
+
+#[tauri::command]
+pub async fn desktop_request_accessibility(app: AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::on_main(app, || Ok(platform::request_accessibility())).await
     }
     #[cfg(not(target_os = "macos"))]
     {

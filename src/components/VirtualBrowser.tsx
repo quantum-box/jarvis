@@ -1,28 +1,45 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { GripHorizontal, Maximize2, Minus, X } from 'lucide-react'
-import { browserRequest, type BrowserBounds, type BrowserStatus } from '../lib/browser'
+import { ArrowRight, GripHorizontal, Maximize2, Minus, X } from 'lucide-react'
+import { browserCurrentUrl, browserRequest, normalizeBrowserAddress, type BrowserBounds, type BrowserLocation, type BrowserStatus } from '../lib/browser'
 import { fitBrowserBounds, resizeBrowserBounds, type BrowserResizeEdge, type BrowserWindowInteraction } from '../lib/browser-window'
 
 const viewport = () => ({ width: window.innerWidth, height: window.innerHeight })
 
-const upsert = (windows: BrowserStatus[], status: BrowserStatus) => {
+type BrowserWindowStatus = BrowserStatus & { currentUrl?: string }
+
+const upsert = (windows: BrowserWindowStatus[], status: BrowserStatus) => {
 	if (!status.open) return windows.filter(window => window.id !== status.id)
 	const index = windows.findIndex(window => window.id === status.id)
 	return index < 0
 		? [...windows, status]
-		: windows.map((window, current) => current === index ? status : window)
+		: windows.map((window, current) => current === index ? { ...window, ...status } : window)
 }
 
+const updateLocation = (windows: BrowserWindowStatus[], location: BrowserLocation) =>
+	windows.map(window => window.id === location.id ? { ...window, currentUrl: location.url } : window)
+
 export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onError: (message: string) => void }) {
-	const [windows, setWindows] = useState<BrowserStatus[]>([])
+	const [windows, setWindows] = useState<BrowserWindowStatus[]>([])
 
 	useEffect(() => {
 		let disposed = false
 		let unlisten: (() => void) | undefined
 		let unlistenActivated: (() => void) | undefined
+		let unlistenLocation: (() => void) | undefined
 		void browserRequest<BrowserStatus[]>('list')
-			.then(value => { if (!disposed) setWindows(value.filter(window => window.open)) })
+			.then(value => {
+				const open = value.filter(window => window.open)
+				if (disposed) return
+				setWindows(open)
+				for (const status of open) {
+					void browserCurrentUrl(status.id)
+						.then(url => {
+							if (!disposed) setWindows(current => updateLocation(current, { id: status.id, url }))
+						})
+						.catch(error => onError(String(error)))
+				}
+			})
 			.catch(error => onError(String(error)))
 		void listen<BrowserStatus>('managed-browser-status', event => {
 			if (!disposed) setWindows(current => upsert(current, event.payload))
@@ -41,10 +58,17 @@ export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onErr
 			if (disposed) remove()
 			else unlistenActivated = remove
 		})
+		void listen<BrowserLocation>('managed-browser-location', event => {
+			if (!disposed) setWindows(current => updateLocation(current, event.payload))
+		}).then(remove => {
+			if (disposed) remove()
+			else unlistenLocation = remove
+		})
 		return () => {
 			disposed = true
 			unlisten?.()
 			unlistenActivated?.()
+			unlistenLocation?.()
 		}
 	}, [onError])
 
@@ -107,12 +131,19 @@ export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onErr
 }
 
 function BrowserPane({ status, onUpdate, onActivate, onError }: {
-	status: BrowserStatus & { bounds: BrowserBounds }
-	onUpdate: (status: BrowserStatus) => void
+	status: BrowserWindowStatus & { bounds: BrowserBounds }
+	onUpdate: (status: BrowserWindowStatus) => void
 	onActivate: (id: string) => void
 	onError: (message: string) => void
 }) {
 	const interaction = useRef<BrowserWindowInteraction | null>(null)
+	const currentAddress = status.currentUrl ?? status.url ?? ''
+	const [address, setAddress] = useState(currentAddress)
+	const [editingAddress, setEditingAddress] = useState(false)
+	const [navigating, setNavigating] = useState(false)
+	useEffect(() => {
+		if (!editingAddress) setAddress(currentAddress)
+	}, [currentAddress, editingAddress])
 	const updateBounds = (bounds: BrowserBounds) => {
 		onUpdate({ ...status, bounds })
 		void browserRequest<BrowserStatus>('set_bounds', { id: status.id, bounds })
@@ -149,6 +180,30 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 			.then(onUpdate)
 			.catch(error => onError(String(error)))
 	}
+	const navigate = (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault()
+		let url: string
+		try {
+			url = normalizeBrowserAddress(address)
+		} catch (error) {
+			onError(error instanceof Error ? error.message : String(error))
+			return
+		}
+		setNavigating(true)
+		void browserRequest<BrowserStatus>('navigate', { id: status.id, url })
+			.then(async next => {
+				let currentUrl = url
+				try {
+					currentUrl = await browserCurrentUrl(status.id)
+				} catch {
+					// The requested URL is still more accurate than the model-safe origin summary.
+				}
+				onUpdate({ ...next, currentUrl })
+				setAddress(currentUrl)
+			})
+			.catch(error => onError(String(error)))
+			.finally(() => setNavigating(false))
+	}
 	const bounds = status.bounds
 	return (
 		<section
@@ -166,6 +221,20 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 					<button aria-label="ブラウザを最小化" onClick={() => setVisible(false)}><Minus size={14} /></button>
 					<button aria-label="ブラウザを閉じる" onClick={close}><X size={14} /></button>
 				</div>
+				<form className="virtual-browser__toolbar" onPointerDown={event => event.stopPropagation()} onSubmit={navigate}>
+					<input
+						aria-label="URL"
+						value={address}
+						onChange={event => setAddress(event.currentTarget.value)}
+						onFocus={() => setEditingAddress(true)}
+						onBlur={() => setEditingAddress(false)}
+						placeholder="https://example.com"
+						autoCapitalize="none"
+						autoComplete="off"
+						spellCheck={false}
+					/>
+					<button type="submit" aria-label="URLへ移動" disabled={navigating || !address.trim()}><ArrowRight size={14} /></button>
+				</form>
 				<div className="virtual-browser__viewport"><span>Web content</span></div>
 				{(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as BrowserResizeEdge[]).map(edge => (
 					<i key={edge} className={`virtual-browser__resize virtual-browser__resize--${edge}`} onPointerDown={event => begin(event, edge)} />
