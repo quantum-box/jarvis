@@ -1,6 +1,6 @@
 [package]
 name = "jarvis"
-version = "0.1.9"
+version = "0.1.10"
 description = "JARVIS desktop shell"
 authors = ["Quantum Box"]
 license = "MIT"
