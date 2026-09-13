@@ -7,7 +7,7 @@ type ChromeProfile = { id: string; name: string; account?: string; lastUsed: boo
 type ChromeProfileStatus = 'ready' | 'permissionDenied' | 'chromeNotFound' | 'noProfiles' | 'error'
 type ChromeProfileReport = { profiles: ChromeProfile[]; status: Exclude<ChromeProfileStatus, 'error'> }
 type ImportResult = {
-	domain: string
+	domain: string | null
 	imported: number
 	expired: number
 	unsupported: number
@@ -55,19 +55,19 @@ export function BrowserSettings() {
 	if (!available) return null
 
 	async function importCookies() {
-		if (!profile || !domain.trim()) return
+		if (!profile) return
 		setBusy(true)
 		setMessage('')
 		try {
 			const result = await invoke<ImportResult>('import_chrome_cookies', {
 				profile,
-				domain: domain.trim(),
+				domain: domain.trim() || null,
 			})
 			const expiry = result.latestExpiryUnix
 				? ` 最長有効期限 ${new Date(result.latestExpiryUnix * 1000).toLocaleDateString('ja-JP')}`
 				: ''
 			setMessage(
-				`${result.domain}: ${result.imported}件を取り込みました。期限切れ ${result.expired}件、未対応 ${result.unsupported}件、失敗 ${result.failed}件。${expiry}`,
+				`${result.domain ?? 'すべてのドメイン'}: ${result.imported}件を取り込みました。期限切れ ${result.expired}件、未対応 ${result.unsupported}件、失敗 ${result.failed}件。${expiry}`,
 			)
 		} catch (error) {
 			setMessage(String(error))
@@ -154,7 +154,7 @@ export function BrowserSettings() {
 				<Globe2 size={18} />
 				<div>
 					<h3 id="browser-settings-title">アプリ内ブラウザ</h3>
-					<p>Chromeの選択したサイトのCookieだけを、このMac上のJARVISへコピーします。</p>
+					<p>ChromeのCookieを、このMac上のJARVISへコピーします。ドメインを空欄にすると、まとめて取り込めます。</p>
 				</div>
 			</div>
 			{profileIssue && (
@@ -194,13 +194,13 @@ export function BrowserSettings() {
 					</select>
 				</label>
 				<label>
-					対象ドメイン
-					<input value={domain} onChange={event => setDomain(event.target.value)} placeholder="example.com" autoComplete="off" spellCheck={false} />
+					対象ドメイン（任意）
+					<input value={domain} onChange={event => setDomain(event.target.value)} placeholder="空欄ですべて" autoComplete="off" spellCheck={false} />
 				</label>
 			</div>
 			<div className="browser-settings-actions">
-				<button className="secondary" disabled={busy || profilesBusy || !profile || !domain.trim()} onClick={() => void importCookies()}>
-					<Cookie size={16} /> Cookieを取り込む
+				<button className="secondary" disabled={busy || profilesBusy || !profile} onClick={() => void importCookies()}>
+					<Cookie size={16} /> {domain.trim() ? 'Cookieを取り込む' : 'すべてのCookieを取り込む'}
 				</button>
 				<button className="danger-secondary" disabled={busy || !domain.trim()} onClick={() => void clearSiteData()}>
 					<Trash2 size={16} /> サイトデータを削除
