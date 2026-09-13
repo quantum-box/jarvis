@@ -67,7 +67,7 @@ export function BrowserSettings() {
 				? ` 最長有効期限 ${new Date(result.latestExpiryUnix * 1000).toLocaleDateString('ja-JP')}`
 				: ''
 			setMessage(
-				`${result.domain ?? 'すべてのドメイン'}: ${result.imported}件を取り込みました。期限切れ ${result.expired}件、未対応 ${result.unsupported}件、失敗 ${result.failed}件。${expiry}`,
+				`${result.domain ?? 'すべてのドメイン'}: ${result.imported}件を取り込みました。アプリ内ブラウザのすべてのウィンドウで利用できます。表示中のページには再読み込み後に反映されます。期限切れ ${result.expired}件、未対応 ${result.unsupported}件、失敗 ${result.failed}件。${expiry}`,
 			)
 		} catch (error) {
 			setMessage(String(error))

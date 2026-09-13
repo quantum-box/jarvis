@@ -41,8 +41,8 @@ export function DesktopSettings() {
 			</div>
 		</div>
 		<p role="status">アクセシビリティ：{granted === null ? '確認中' : granted ? '許可済み' : '未許可'}</p>
-		<p className="muted">macOSの「プライバシーとセキュリティ」→「アクセシビリティ」でJARVISを許可してください。ウィンドウの対応範囲と最小サイズ、ショートカットの動作は各アプリに従います。</p>
-		<button type="button" className="text-button" disabled={busy} onClick={() => void openSettings()}>アクセシビリティ設定を開く</button>
+		<p className="muted">この許可は、外部アプリ名を指定して操作するときだけ必要です。アプリ内ブラウザの操作には必要ありません。macOSの「プライバシーとセキュリティ」→「アクセシビリティ」でJARVISを許可してください。ウィンドウの対応範囲と最小サイズ、ショートカットの動作は各アプリに従います。</p>
+		{granted === false && <button type="button" className="text-button" disabled={busy} onClick={() => void openSettings()}>アクセシビリティを許可する</button>}
 		{message && <p role="alert" className="error-banner">{message}</p>}
 	</section>
 }

@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { GripHorizontal, Maximize2, Minus, X } from 'lucide-react'
-import { browserRequest, type BrowserBounds, type BrowserStatus } from '../lib/browser'
+import { ArrowRight, GripHorizontal, Maximize2, Minus, X } from 'lucide-react'
+import { browserRequest, normalizeBrowserAddress, type BrowserBounds, type BrowserStatus } from '../lib/browser'
 import { fitBrowserBounds, resizeBrowserBounds, type BrowserResizeEdge, type BrowserWindowInteraction } from '../lib/browser-window'
 
 const viewport = () => ({ width: window.innerWidth, height: window.innerHeight })
@@ -113,6 +113,12 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 	onError: (message: string) => void
 }) {
 	const interaction = useRef<BrowserWindowInteraction | null>(null)
+	const [address, setAddress] = useState(status.url ?? '')
+	const [editingAddress, setEditingAddress] = useState(false)
+	const [navigating, setNavigating] = useState(false)
+	useEffect(() => {
+		if (!editingAddress) setAddress(status.url ?? '')
+	}, [editingAddress, status.url])
 	const updateBounds = (bounds: BrowserBounds) => {
 		onUpdate({ ...status, bounds })
 		void browserRequest<BrowserStatus>('set_bounds', { id: status.id, bounds })
@@ -149,6 +155,24 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 			.then(onUpdate)
 			.catch(error => onError(String(error)))
 	}
+	const navigate = (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault()
+		let url: string
+		try {
+			url = normalizeBrowserAddress(address)
+		} catch (error) {
+			onError(error instanceof Error ? error.message : String(error))
+			return
+		}
+		setNavigating(true)
+		void browserRequest<BrowserStatus>('navigate', { id: status.id, url })
+			.then(next => {
+				onUpdate(next)
+				setAddress(next.url ?? url)
+			})
+			.catch(error => onError(String(error)))
+			.finally(() => setNavigating(false))
+	}
 	const bounds = status.bounds
 	return (
 		<section
@@ -166,6 +190,20 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 					<button aria-label="ブラウザを最小化" onClick={() => setVisible(false)}><Minus size={14} /></button>
 					<button aria-label="ブラウザを閉じる" onClick={close}><X size={14} /></button>
 				</div>
+				<form className="virtual-browser__toolbar" onPointerDown={event => event.stopPropagation()} onSubmit={navigate}>
+					<input
+						aria-label="URL"
+						value={address}
+						onChange={event => setAddress(event.currentTarget.value)}
+						onFocus={() => setEditingAddress(true)}
+						onBlur={() => setEditingAddress(false)}
+						placeholder="https://example.com"
+						autoCapitalize="none"
+						autoComplete="off"
+						spellCheck={false}
+					/>
+					<button type="submit" aria-label="URLへ移動" disabled={navigating || !address.trim()}><ArrowRight size={14} /></button>
+				</form>
 				<div className="virtual-browser__viewport"><span>Web content</span></div>
 				{(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as BrowserResizeEdge[]).map(edge => (
 					<i key={edge} className={`virtual-browser__resize virtual-browser__resize--${edge}`} onPointerDown={event => begin(event, edge)} />

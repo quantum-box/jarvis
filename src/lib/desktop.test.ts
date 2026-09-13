@@ -1,11 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
 import { BrowserToolRunner, browserBackendConfig, browserSessionConfig, type browserRequest } from './browser'
-import { DesktopToolController, explicitlyRequestsDesktopAction, parseDesktopShortcut, parseDesktopWindowBounds, type DesktopState, type DesktopWindow, type DesktopWindowsState, type desktopRequest } from './desktop'
+import { DesktopToolController, explicitlyRequestsDesktopAction, parseDesktopShortcut, parseDesktopWindowBounds, shouldRequestAccessibilityOnLaunch, type DesktopState, type DesktopWindow, type DesktopWindowsState, type desktopRequest } from './desktop'
 import type { RealtimeEvent } from './realtime'
 
 const codex = { pid: 42, bundleId: 'com.openai.codex', name: 'Codex' }
 const target = { pid: codex.pid, bundle_id: codex.bundleId }
 const chord = { ...target, key: '1', modifiers: ['cmd'] }
+
+describe('Accessibility launch prompt', () => {
+	it('requests once and records the prompt before dispatch', () => {
+		const values = new Map<string, string>()
+		const storage = {
+			getItem: (key: string) => values.get(key) ?? null,
+			setItem: (key: string, value: string) => { values.set(key, value) },
+		}
+		expect(shouldRequestAccessibilityOnLaunch(storage)).toBe(true)
+		expect(shouldRequestAccessibilityOnLaunch(storage)).toBe(false)
+	})
+
+	it('does not repeatedly prompt when local persistence is unavailable', () => {
+		const storage = { getItem: () => null, setItem: () => { throw new Error('unavailable') } }
+		expect(shouldRequestAccessibilityOnLaunch(storage)).toBe(false)
+	})
+})
 
 function fixture() {
 	const state: DesktopState = { apps: [codex], frontmostPid: 7, accessibilityGranted: true, generation: 0 }

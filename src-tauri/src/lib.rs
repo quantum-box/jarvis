@@ -88,6 +88,7 @@ pub fn run() {
             desktop::desktop_send_shortcut,
             desktop::desktop_cancel_pending,
             desktop::desktop_open_accessibility_settings,
+            desktop::desktop_request_accessibility,
             browser::browser_open,
             browser::browser_create,
             browser::browser_navigate,
