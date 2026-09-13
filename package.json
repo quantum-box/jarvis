@@ -1,6 +1,6 @@
 {
   "name": "jarvis",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -8,6 +8,7 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "check:version": "node scripts/check-release-version.mjs",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "mobile:android:init": "tauri android init --ci --skip-targets-install && python3 scripts/prepare-android.py",
