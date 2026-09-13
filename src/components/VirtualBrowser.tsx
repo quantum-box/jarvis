@@ -1,28 +1,45 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ArrowRight, GripHorizontal, Maximize2, Minus, X } from 'lucide-react'
-import { browserRequest, normalizeBrowserAddress, type BrowserBounds, type BrowserStatus } from '../lib/browser'
+import { browserCurrentUrl, browserRequest, normalizeBrowserAddress, type BrowserBounds, type BrowserLocation, type BrowserStatus } from '../lib/browser'
 import { fitBrowserBounds, resizeBrowserBounds, type BrowserResizeEdge, type BrowserWindowInteraction } from '../lib/browser-window'
 
 const viewport = () => ({ width: window.innerWidth, height: window.innerHeight })
 
-const upsert = (windows: BrowserStatus[], status: BrowserStatus) => {
+type BrowserWindowStatus = BrowserStatus & { currentUrl?: string }
+
+const upsert = (windows: BrowserWindowStatus[], status: BrowserStatus) => {
 	if (!status.open) return windows.filter(window => window.id !== status.id)
 	const index = windows.findIndex(window => window.id === status.id)
 	return index < 0
 		? [...windows, status]
-		: windows.map((window, current) => current === index ? status : window)
+		: windows.map((window, current) => current === index ? { ...window, ...status } : window)
 }
 
+const updateLocation = (windows: BrowserWindowStatus[], location: BrowserLocation) =>
+	windows.map(window => window.id === location.id ? { ...window, currentUrl: location.url } : window)
+
 export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onError: (message: string) => void }) {
-	const [windows, setWindows] = useState<BrowserStatus[]>([])
+	const [windows, setWindows] = useState<BrowserWindowStatus[]>([])
 
 	useEffect(() => {
 		let disposed = false
 		let unlisten: (() => void) | undefined
 		let unlistenActivated: (() => void) | undefined
+		let unlistenLocation: (() => void) | undefined
 		void browserRequest<BrowserStatus[]>('list')
-			.then(value => { if (!disposed) setWindows(value.filter(window => window.open)) })
+			.then(value => {
+				const open = value.filter(window => window.open)
+				if (disposed) return
+				setWindows(open)
+				for (const status of open) {
+					void browserCurrentUrl(status.id)
+						.then(url => {
+							if (!disposed) setWindows(current => updateLocation(current, { id: status.id, url }))
+						})
+						.catch(error => onError(String(error)))
+				}
+			})
 			.catch(error => onError(String(error)))
 		void listen<BrowserStatus>('managed-browser-status', event => {
 			if (!disposed) setWindows(current => upsert(current, event.payload))
@@ -41,10 +58,17 @@ export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onErr
 			if (disposed) remove()
 			else unlistenActivated = remove
 		})
+		void listen<BrowserLocation>('managed-browser-location', event => {
+			if (!disposed) setWindows(current => updateLocation(current, event.payload))
+		}).then(remove => {
+			if (disposed) remove()
+			else unlistenLocation = remove
+		})
 		return () => {
 			disposed = true
 			unlisten?.()
 			unlistenActivated?.()
+			unlistenLocation?.()
 		}
 	}, [onError])
 
@@ -107,18 +131,19 @@ export function VirtualBrowser({ obscured, onError }: { obscured: boolean; onErr
 }
 
 function BrowserPane({ status, onUpdate, onActivate, onError }: {
-	status: BrowserStatus & { bounds: BrowserBounds }
-	onUpdate: (status: BrowserStatus) => void
+	status: BrowserWindowStatus & { bounds: BrowserBounds }
+	onUpdate: (status: BrowserWindowStatus) => void
 	onActivate: (id: string) => void
 	onError: (message: string) => void
 }) {
 	const interaction = useRef<BrowserWindowInteraction | null>(null)
-	const [address, setAddress] = useState(status.url ?? '')
+	const currentAddress = status.currentUrl ?? status.url ?? ''
+	const [address, setAddress] = useState(currentAddress)
 	const [editingAddress, setEditingAddress] = useState(false)
 	const [navigating, setNavigating] = useState(false)
 	useEffect(() => {
-		if (!editingAddress) setAddress(status.url ?? '')
-	}, [editingAddress, status.url])
+		if (!editingAddress) setAddress(currentAddress)
+	}, [currentAddress, editingAddress])
 	const updateBounds = (bounds: BrowserBounds) => {
 		onUpdate({ ...status, bounds })
 		void browserRequest<BrowserStatus>('set_bounds', { id: status.id, bounds })
@@ -166,9 +191,15 @@ function BrowserPane({ status, onUpdate, onActivate, onError }: {
 		}
 		setNavigating(true)
 		void browserRequest<BrowserStatus>('navigate', { id: status.id, url })
-			.then(next => {
-				onUpdate(next)
-				setAddress(next.url ?? url)
+			.then(async next => {
+				let currentUrl = url
+				try {
+					currentUrl = await browserCurrentUrl(status.id)
+				} catch {
+					// The requested URL is still more accurate than the model-safe origin summary.
+				}
+				onUpdate({ ...next, currentUrl })
+				setAddress(currentUrl)
 			})
 			.catch(error => onError(String(error)))
 			.finally(() => setNavigating(false))

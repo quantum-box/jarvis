@@ -93,6 +93,7 @@ pub fn run() {
             browser::browser_create,
             browser::browser_navigate,
             browser::browser_status,
+            browser::browser_current_url,
             browser::browser_list,
             browser::browser_activate,
             browser::browser_set_bounds,

@@ -315,6 +315,25 @@ describe('BrowserToolRunner', () => {
 		expect(f.operations).toEqual([{ operation: 'navigate', args: { url: 'https://example.com/account/settings' } }])
 	})
 
+	it('requires approval when the model URL is only a prefix of the requested URL', async () => {
+		const approve = vi.fn(async () => false)
+		const f = fixture(approve)
+		f.runner.setUserUtterance('open https://example.com/delete-account-preview')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/delete-account' }, 'prefix-url-navigation'))
+		await f.runner.settled()
+		expect(approve).toHaveBeenCalledOnce()
+		expect(f.operations).toEqual([])
+	})
+
+	it('canonicalizes an explicitly requested URL before comparing it', async () => {
+		const f = fixture()
+		f.runner.setUserUtterance('HTTPS://EXAMPLE.COM:443/account を開いて')
+		f.runner.handle(done('browser_navigate', { url: 'https://example.com/account' }, 'canonical-url-navigation'))
+		await f.runner.settled()
+		expect(f.approve).not.toHaveBeenCalled()
+		expect(f.operations).toEqual([{ operation: 'navigate', args: { url: 'https://example.com/account' } }])
+	})
+
 	it('requires approval when a named host is given a model-invented non-default port', async () => {
 		const approve = vi.fn(async () => false)
 		const f = fixture(approve)

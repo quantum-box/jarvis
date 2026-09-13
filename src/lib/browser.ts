@@ -14,6 +14,11 @@ export interface BrowserStatus {
 	opacity: number
 }
 
+export interface BrowserLocation {
+	id: string
+	url: string
+}
+
 export interface BrowserBounds {
 	x: number
 	y: number
@@ -116,6 +121,12 @@ export const browserRequest = <T = unknown>(
 	operation: string,
 	args: Record<string, unknown> = {},
 ) => invoke<T>(`browser_${operation}`, args)
+
+// This deliberately stays outside the model-facing browser tool surface. The
+// full URL can contain sensitive path, query, or fragment data and is used only
+// by the in-app address bar.
+export const browserCurrentUrl = (id: string) =>
+	invoke<string>('browser_current_url', { id })
 
 const tool = (
 	name: string,
@@ -317,6 +328,22 @@ const negationWords =
 
 const utteranceHasNegation = (utterance: string) => negationWords.test(utterance)
 
+const canonicalUrl = (value: string) => {
+	try {
+		return new URL(value).toString()
+	} catch {
+		return null
+	}
+}
+
+const urlTokens = (clause: string) =>
+	(clause.match(/https?:\/\/[^\s\u3000"'<>]+/gi) ?? [])
+		.map(token => token
+			.replace(/(?:を|に|へ)?(?:開いて(?:ください)?|行って(?:ください)?|アクセスして(?:ください)?|移動して(?:ください)?)$/i, '')
+			.replace(/[\])}>、。！？!?；;，,.]+$/g, ''))
+		.map(canonicalUrl)
+		.filter((url): url is string => url !== null)
+
 const typingWords =
 	/(入力して|入力する|記入して|記入する|タイプして|タイプする|書き込んで|書き込む|貼り付けて|貼り付ける|ペーストして|ペーストする|打ち込んで|打ち込む|書いて|入れて|\b(?:type|enter|fill|write|paste)\b)/i
 
@@ -341,9 +368,10 @@ const utteranceRequestsHostnameNavigation = (utterance: string, hostname: string
 const explicitlyNamesPlainDestination = (utterance: string, value: string) => {
 	try {
 		const url = new URL(value)
+		const canonicalDestination = url.toString()
 		const exactlyRequestsUrl = utterance.split(/[。！？!?；;,，、\n]+/).some(clause =>
 			/(?:開いて|行って|アクセスして|移動して|open|visit|go\s+to|navigate\s+to)/i.test(clause) &&
-			normalized(clause).includes(normalized(url.toString())))
+			urlTokens(clause).some(token => token === canonicalDestination))
 		if (!utteranceHasNegation(utterance) && exactlyRequestsUrl) return true
 		const destinationName = url.port && url.port !== '443' ? url.host : url.hostname
 		return (

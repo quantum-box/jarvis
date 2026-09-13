@@ -24,6 +24,13 @@ pub struct BrowserStatus {
     opacity: f64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserLocation {
+    id: String,
+    url: String,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -52,6 +59,7 @@ mod platform {
     const LABEL_PREFIX: &str = "managed-browser";
     const COOKIE_HELPER_LABEL: &str = "managed-browser-cookie-store";
     const STATUS_EVENT: &str = "managed-browser-status";
+    const LOCATION_EVENT: &str = "managed-browser-location";
     const ACTIVATED_EVENT: &str = "managed-browser-activated";
     const DEFAULT_URL: &str = "https://www.google.com/";
     const BLANK_URL: &str = "about:blank";
@@ -348,6 +356,17 @@ mod platform {
         }
     }
 
+    fn emit_location(app: &AppHandle, id: &str, url: &tauri::Url) {
+        let _ = app.emit_to(
+            "main",
+            LOCATION_EVENT,
+            BrowserLocation {
+                id: id.to_string(),
+                url: url.to_string(),
+            },
+        );
+    }
+
     fn next_frame(app: &AppHandle, order: u64) -> Result<BrowserBounds, String> {
         let base = constrain_bounds(app, None)?;
         let step = ((order.saturating_sub(1)) % 5) as f64;
@@ -411,13 +430,19 @@ mod platform {
         };
         let page_load_app = app.clone();
         let page_load_id = id.clone();
+        let navigation_app = app.clone();
+        let navigation_id = id.clone();
         let title_app = app.clone();
         let title_id = id.clone();
         let builder = WebviewBuilder::new(&id, WebviewUrl::External(url))
             .data_directory(data_dir)
             .data_store_identifier(BROWSER_DATA_STORE_ID)
-            .on_navigation(|candidate| {
-                is_blank_url(candidate) || validate_url(candidate.as_str()).is_ok()
+            .on_navigation(move |candidate| {
+                let allowed = is_blank_url(candidate) || validate_url(candidate.as_str()).is_ok();
+                if allowed {
+                    emit_location(&navigation_app, &navigation_id, candidate);
+                }
+                allowed
             })
             .on_new_window(|_, _| NewWindowResponse::Deny)
             .on_download(|_, _| false)
@@ -429,6 +454,7 @@ mod platform {
                             meta.finished_page_url = payload.url().to_string();
                         }
                     }
+                    emit_location(&page_load_app, &page_load_id, payload.url());
                     emit_status(&page_load_app, &page_load_id);
                 }
             })
@@ -805,6 +831,20 @@ mod platform {
         } else {
             Ok(closed_status(String::new()))
         }
+    }
+
+    pub fn current_url(app: &AppHandle, id: &str) -> Result<String, String> {
+        let managed = browsers()
+            .lock()
+            .ok()
+            .is_some_and(|browsers| browsers.contains_key(id));
+        if !managed {
+            return Err("ブラウザが見つかりませんでした。".into());
+        }
+        webview_by_id(app, id)?
+            .url()
+            .map(|url| url.to_string())
+            .map_err(|_| "現在のURLを取得できませんでした。".to_string())
     }
 
     pub fn list(app: &AppHandle) -> Vec<BrowserStatus> {
@@ -1568,6 +1608,17 @@ pub async fn browser_status(app: AppHandle) -> Result<BrowserStatus, String> {
             bounds: None,
             opacity: 1.0,
         })
+    }
+}
+
+#[tauri::command]
+pub async fn browser_current_url(app: AppHandle, id: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return platform::current_url(&app, &id);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id);
+        Err("アプリ内ブラウザはmacOS版で利用できます。".into())
     }
 }
 
