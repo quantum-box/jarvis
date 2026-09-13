@@ -213,7 +213,9 @@ for an already published version. The app only accepts a newer version with a va
 
 The **Publish signed desktop updates** workflow runs when a `package.json` version
 change is merged into `main`, and can also be manually dispatched on `main`.
-Merging application changes without increasing the version does not publish an update.
+Every pull request must increase the release version and keep `package.json`, both lock
+files, the Tauri configuration, and the release-note heading in sync. The `Release version`
+CI check enforces this against the pull request's base commit.
 Dependency-only changes to `package.json` skip the release build.
 It builds both macOS architectures, validates and combines their manifests, uploads a
 complete draft release, and only then makes it public. Only the publish job has
