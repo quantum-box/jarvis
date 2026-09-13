@@ -30,7 +30,7 @@ enum ChromeProfileStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CookieImportResult {
-    domain: String,
+    domain: Option<String>,
     imported: usize,
     expired: usize,
     unsupported: usize,
@@ -422,26 +422,33 @@ mod platform {
         partition_key: String,
     }
 
-    fn read_rows(connection: &Connection, domain: &str) -> Result<Vec<CookieRow>, String> {
+    fn read_rows(connection: &Connection, domain: Option<&str>) -> Result<Vec<CookieRow>, String> {
         let partition = if has_column(connection, "top_frame_site_key") {
             "top_frame_site_key"
         } else {
             "''"
         };
-        let domains = cookie_domains_for_target(domain);
-        let placeholders = (1..=domains.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let descendant_index = domains.len() + 1;
-        let sql = format!(
-            "SELECT host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,has_expires,samesite,{partition} FROM cookies WHERE host_key IN ({placeholders}) OR substr(host_key, -length(?{descendant_index})) = ?{descendant_index}"
+        let select = format!(
+            "SELECT host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,has_expires,samesite,{partition} FROM cookies"
         );
+        let (sql, parameters) = if let Some(domain) = domain {
+            let mut domains = cookie_domains_for_target(domain);
+            let placeholders = (1..=domains.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let descendant_index = domains.len() + 1;
+            let sql = format!(
+                "{select} WHERE host_key IN ({placeholders}) OR substr(host_key, -length(?{descendant_index})) = ?{descendant_index}"
+            );
+            domains.push(format!(".{domain}"));
+            (sql, domains)
+        } else {
+            (select, Vec::new())
+        };
         let mut statement = connection
             .prepare(&sql)
             .map_err(|_| "ChromeのCookieデータ形式を読み取れませんでした。".to_string())?;
-        let mut parameters = domains;
-        parameters.push(format!(".{domain}"));
         let rows = statement
             .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
                 Ok(CookieRow {
@@ -468,7 +475,15 @@ mod platform {
         connection: &Connection,
         domain: &str,
     ) -> Result<Vec<String>, String> {
-        Ok(read_rows(connection, domain)?
+        Ok(read_rows(connection, Some(domain))?
+            .into_iter()
+            .map(|row| row.host)
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(super) fn all_hosts_for_test(connection: &Connection) -> Result<Vec<String>, String> {
+        Ok(read_rows(connection, None)?
             .into_iter()
             .map(|row| row.host)
             .collect())
@@ -506,9 +521,12 @@ mod platform {
     pub async fn import(
         app: &AppHandle,
         profile: String,
-        domain: String,
+        domain: Option<String>,
     ) -> Result<CookieImportResult, String> {
-        let domain = normalize_domain(&domain)?;
+        let domain = domain
+            .filter(|domain| !domain.trim().is_empty())
+            .map(|domain| normalize_domain(&domain))
+            .transpose()?;
         let source = validate_profile(app, &profile)?;
         // Reading the live database through SQLite keeps the main file and WAL in one
         // consistent snapshot. Copying those files separately can lose a checkpoint
@@ -522,7 +540,7 @@ mod platform {
             .transaction()
             .map_err(|_| "ChromeのCookieデータを読み取り用に固定できませんでした。".to_string())?;
         let version = database_version(&transaction);
-        let rows = read_rows(&transaction, &domain)?;
+        let rows = read_rows(&transaction, domain.as_deref())?;
         transaction
             .rollback()
             .map_err(|_| "ChromeのCookieデータの読み取りを終了できませんでした。".to_string())?;
@@ -646,7 +664,7 @@ pub async fn open_chrome_data_access_settings(app: AppHandle) -> Result<(), Stri
 pub async fn import_chrome_cookies(
     app: AppHandle,
     profile: String,
-    domain: String,
+    domain: Option<String>,
 ) -> Result<CookieImportResult, String> {
     #[cfg(target_os = "macos")]
     return platform::import(&app, profile, domain).await;
@@ -674,8 +692,8 @@ pub async fn clear_browser_site_data(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::platform::{
-        cookie_host_matches_target, database_version, decrypt_value, keychain_error_message,
-        matching_hosts_for_test, normalize_domain, parse_profile_metadata,
+        all_hosts_for_test, cookie_host_matches_target, database_version, decrypt_value,
+        keychain_error_message, matching_hosts_for_test, normalize_domain, parse_profile_metadata,
     };
     use aes::Aes128;
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
@@ -796,6 +814,27 @@ mod tests {
             "example.com",
             "login.example.com"
         ));
+    }
+
+    #[test]
+    fn reads_all_cookie_domains_when_no_target_is_given() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cookies (
+                    host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB,
+                    path TEXT, expires_utc INTEGER, is_secure INTEGER,
+                    is_httponly INTEGER, has_expires INTEGER, samesite INTEGER
+                );
+                INSERT INTO cookies VALUES
+                    ('example.com','a','v',x'','/',0,0,0,0,0),
+                    ('.other.example','b','v',x'','/',0,0,0,0,0);",
+            )
+            .unwrap();
+
+        let mut hosts = all_hosts_for_test(&connection).unwrap();
+        hosts.sort();
+        assert_eq!(hosts, [".other.example", "example.com"]);
     }
 
     #[test]

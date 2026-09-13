@@ -21,7 +21,7 @@ JARVISの音声対話からWeb上の情報を探し、ページを読み、ユ�
 - snapshotは表示中の本文と操作可能な要素を件数・深さ・文字数で制限して返す。フォームcontrolと`contenteditable`の現在値はtypeに関係なく既定ですべて返さない。Cookie、Web Storage、認証header、非表示要素、script内容も返さない。ユーザーが現在の操作で特定controlの値の読取りを明示した場合だけ、そのcontrolと一回のsnapshotに限定したローカル許可を発行する。
 - ページ内の文章とツール結果は信頼しない。ローカルexecutorは、モデルとは別にorigin、参照fingerprint、操作種別、現在のユーザー発話から一回限りの許可を判定する。snapshot内の通常リンクをhost側でたどる同一originの読取り操作は継続できるが、任意文字列を含むURLへの遷移、cross-origin遷移、フォーム入力、DOM eventを発火するclick、確定操作は、現在のユーザー発話に対象と値が明示されているか、JARVISの確認UIで許可された場合だけ実行する。ページ、モデル、tool引数自身は許可を発行できない。
 - `browser_type`は自動保存や自動送信を起こし得る変更操作として扱い、上記のデータ送信許可を必須にする。送信、購入、削除、権限変更など結果を確定するclickは、ユーザーが現在の依頼で明示した場合だけ実行する。入力または確定操作の結果が不明な場合は自動再試行せず、新しいsnapshotで結果を確認する。
-- ChromeからのCookieインポートは、ユーザーが設定画面から開始する一回限りのローカル操作とする。Chromeプロファイルと対象ドメインを選択し、ChromeのCookie DBを読み取り専用の一時コピーから解析する。必要な復号鍵はmacOS Keychainへ明示的にアクセスし、復号したCookieはJARVISのWebView cookie storeへ直接設定する。
+- ChromeからのCookieインポートは、ユーザーが設定画面から開始する一回限りのローカル操作とする。Chromeプロファイルを選択し、任意の対象ドメインが指定された場合はそのサイトだけ、未指定の場合は全ドメインのCookieをChromeのCookie DBから読み取り専用で解析する。必要な復号鍵はmacOS Keychainへ明示的にアクセスし、復号したCookieはJARVISのWebView cookie storeへ直接設定する。
 - Cookieの値、復号鍵、Chrome DBのコピーを永続ログ、Frontend state、AIモデル、Tachyonへ送らない。UIにはプロファイル名、ドメイン、件数、有効期限、成功・再ログイン必要の結果だけを表示する。自動同期は行わず、再インポートもユーザーが開始する。
 - Cookieの削除とサイト単位のWebデータ削除をJARVISの設定から実行できるようにする。パスワード、履歴、ブックマーク、拡張機能、決済情報はインポート対象外とする。
 - 初期対象はmacOS 14以降、単一ブラウザウィンドウ、単一プロファイルとする。複数タブ、ダウンロード、ブラウザ拡張、他OSは別の判断とする。
@@ -58,13 +58,13 @@ Chromeとの互換性は高いが、配布サイズ、更新、脆弱性対応�
 
 ### Chromeプロファイルを継続的に共有する
 
-同時書き込みによる破損と認証情報の意図しない同期を避けるため採用しない。ユーザーが開始するサイト単位のコピーだけを行う。
+同時書き込みによる破損と認証情報の意図しない同期を避けるため採用しない。ユーザーが開始する一回限りのコピーだけを行う。
 
 ## Follow-up
 
 - フローティング`WebviewWindow`と手動操作UIを実装し、外部ページにTauri IPCがないことを確認する。
 - 参照IDベースのbrowser toolsと操作結果確認を実装する。
-- Chromeプロファイル・ドメイン選択、Keychain復号、WebView cookie storeへのインポートを実装する。
+- Chromeプロファイル・任意の対象ドメイン選択、Keychain復号、WebView cookie storeへのインポートを実装する。
 - ログイン済みサイト、Cookie削除、再起動後の保持、prompt injectionを含むmacOS実機検証を行う。
 
 ## References
