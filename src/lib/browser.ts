@@ -816,6 +816,7 @@ export class BrowserToolRunner {
 			detail = referenceDetail.href
 		}
 		if (explicit) return true
+		this.assertCurrent(generation)
 		const approved = await this.approve({
 			id: `${generation}-${Date.now()}`,
 			operation,

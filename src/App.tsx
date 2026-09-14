@@ -88,6 +88,7 @@ export default function App() {
   const client = useRef<RealtimeClient | null>(null);
   const browserTools = useRef<BrowserToolRunner | null>(null);
   const browserApprovalResolver = useRef<((approved: boolean) => void) | null>(null);
+  const browserApprovalDialog = useRef<HTMLDialogElement>(null);
   const [browserApproval, setBrowserApproval] = useState<BrowserApprovalRequest | null>(null);
   const conversationEndPending = useRef(false);
   const conversationFarewellStarted = useRef(false);
@@ -109,6 +110,9 @@ export default function App() {
   useEffect(() => {
     browserTools.current?.setSuspended(browserExecutionObscured);
   }, [browserExecutionObscured]);
+  useEffect(() => {
+    if (browserApproval) browserApprovalDialog.current?.showModal();
+  }, [browserApproval]);
   useEffect(() => {
     if (!browserAvailable) return;
     void browserRequest('set_opacity', { opacity: loadBrowserOpacity() })
@@ -652,19 +656,25 @@ export default function App() {
           />
         )}
       {browserApproval && (
-        <div className="browser-approval-backdrop" role="presentation">
-          <section className="browser-approval" role="dialog" aria-modal="true" aria-labelledby="browser-approval-title">
+          <dialog
+            ref={browserApprovalDialog}
+            className="browser-approval"
+            aria-labelledby="browser-approval-title"
+            onCancel={event => {
+              event.preventDefault();
+              resolveBrowserApproval(false);
+            }}
+          >
             <span className="eyebrow">Browser action</span>
             <h2 id="browser-approval-title">この操作を1回だけ許可しますか？</h2>
             <p>{browserApproval.description}</p>
             {browserApproval.detail && <code>{browserApproval.detail}</code>}
             <p className="muted">依頼した操作と対象を確認してください。</p>
             <div className="browser-approval-actions">
-              <button className="text-button" onClick={() => resolveBrowserApproval(false)}>許可しない</button>
+              <button autoFocus className="text-button" onClick={() => resolveBrowserApproval(false)}>許可しない</button>
               <button className="primary" onClick={() => resolveBrowserApproval(true)}>1回だけ許可</button>
             </div>
-          </section>
-        </div>
+          </dialog>
       )}
       {loginSession && <Login auth={loginSession} onAuthenticated={() => finishLogin(loginSession)} onClose={cancelLogin}/>}
     </div>

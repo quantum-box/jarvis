@@ -640,8 +640,8 @@ button svg {
 .virtual-browser__resize--nw { top: 0; left: 0; cursor: nwse-resize; }
 .virtual-browser__resize--se { right: 0; bottom: 0; cursor: nwse-resize; }
 .virtual-browser__resize--sw { left: 0; bottom: 0; cursor: nesw-resize; }
-.browser-approval-backdrop { position: fixed; inset: 0; z-index: 100; background: #04060bd9; backdrop-filter: blur(8px); display: grid; place-items: center; padding: 20px; }
-.browser-approval { width: min(480px, 100%); border: 1px solid #786341; border-radius: 16px; background: #14191e; padding: 26px; box-shadow: 0 24px 80px #000b; }
+.browser-approval { width: min(480px, calc(100% - 40px)); border: 1px solid #786341; border-radius: 16px; background: #14191e; color: var(--text); padding: 26px; box-shadow: 0 24px 80px #000b; }
+.browser-approval::backdrop { background: #04060bd9; backdrop-filter: blur(8px); }
 .browser-approval h2 { font-size: 19px; margin: 8px 0 14px; }
 .browser-approval p { font-size: 12px; line-height: 1.8; }
 .browser-approval code { display: block; max-height: 120px; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; background: #090d11; border: 1px solid var(--line); border-radius: 8px; padding: 11px; color: #e8d6b6; font-size: 11px; }
