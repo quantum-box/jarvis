@@ -164,6 +164,27 @@ describe('BrowserToolRunner', () => {
 		expect(JSON.stringify(events)).not.toContain(exactHref)
 	})
 
+	it('does not request approval when interrupted during link preflight', async () => {
+		let resolveDetail: ((value: { ok: boolean; href: string; label: string }) => void) | undefined
+		const approve = vi.fn(async () => false)
+		const request = vi.fn(async (operation: string) => {
+			if (operation === 'snapshot') return snapshot
+			if (operation === 'reference_detail') {
+				return new Promise(resolve => { resolveDetail = resolve })
+			}
+			return { ok: true }
+		}) as unknown as typeof browserRequest
+		const runner = new BrowserToolRunner({ sendEvent: () => {} }, request, approve)
+		runner.handle(done('browser_snapshot', {}, 'snapshot-before-interrupted-detail'))
+		await runner.settled()
+		runner.handle(done('browser_click', { reference: 'e3-1' }, 'interrupted-detail'))
+		await vi.waitFor(() => expect(request).toHaveBeenCalledWith('reference_detail', { reference: 'e3-1' }))
+		runner.handle({ type: 'input_audio_buffer.speech_started' })
+		resolveDetail?.({ ok: true, href: 'https://example.com/help', label: 'ヘルプ' })
+		await runner.settled()
+		expect(approve).not.toHaveBeenCalled()
+	})
+
 	it('requires approval for a consequential same-origin root link', async () => {
 		const approve = vi.fn(async () => false)
 		const risky = {
