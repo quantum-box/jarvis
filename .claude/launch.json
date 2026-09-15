@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "vite", "runtimeExecutable": "/bin/zsh", "runtimeArgs": ["-c", "export PATH=\"$(~/.local/bin/mise where node@24.21.0)/bin:$PATH\" && npm run dev"], "port": 1420 }
+  ]
+}
