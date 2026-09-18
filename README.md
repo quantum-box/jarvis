@@ -55,6 +55,8 @@ GPT Live実装はTachyonの `POST /v1/llms/chatrooms/{chatroom_id}/agent/live/se
 
 開発用の動作プレビュー: `npm run dev` 後、`http://127.0.0.1:1420/?preview=motion` で待機・思考・発話を切り替えられます。模擬音量を使い、音声/API接続は行いません。製品ビルドにはこのプレビューは含まれません。
 
+データ表示コンポーネント（`src/components/DataViewPanel.tsx`）は、`?preview=dataview` でホログラム調のタスクボード表示を確認できます。表示内容は `src/lib/data-view.ts` の `ViewSpec`（データをパスで参照する宣言的な定義）で指定します。現時点では会話やツールには接続していません。
+
 会話パネルは初期状態で閉じています。右上の会話ボタンで開閉でき、閉じても履歴と入力は維持されます。パネル内の×またはEscapeでも閉じられます。
 
 球体は画面全体に固定した背景として描画し、会話パネルの開閉やレイアウトに依存せず大きく表示します。
