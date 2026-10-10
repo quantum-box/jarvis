@@ -46,7 +46,7 @@ jobs:
           test "$platform" = iPhoneSimulator
           /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$app/Info.plist"
           ditto -c -k --sequesterRsrc --keepParent "$app" JARVIS-ios-simulator-arm64.zip
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: JARVIS-ios-simulator-arm64
           path: JARVIS-ios-simulator-arm64.zip
@@ -93,7 +93,7 @@ jobs:
           grep -F "native-code: 'arm64-v8a'" /tmp/jarvis-apk.txt
           grep -F "android.permission.RECORD_AUDIO" /tmp/jarvis-apk.txt
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: JARVIS-android-arm64-debug
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
